@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>人格深度重构与洗稿引擎</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: "Microsoft YaHei", Arial, sans-serif; background: #1a1a2e; color: #eee; height: 100vh; }
+        .container { display: flex; height: 100vh; }
+
+        /* Left Column - Author Library */
+        .left-col { width: 280px; background: #16213e; padding: 20px; overflow-y: auto; border-right: 1px solid #0f3460; display: flex; flex-direction: column; }
+        .left-col-content { flex: 1; }
+        .left-col h2 { font-size: 16px; margin-bottom: 15px; color: #e94560; }
+        .author-list { list-style: none; }
+        .author-item { background: #1a1a2e; padding: 12px; margin-bottom: 8px; border-radius: 6px; cursor: pointer; transition: all 0.2s; }
+        .author-item:hover { background: #0f3460; }
+        .author-item.selected { border: 2px solid #e94560; }
+        .author-item h3 { font-size: 14px; margin-bottom: 4px; }
+        .author-item p { font-size: 11px; color: #888; }
+        .author-item .verbal-tics { font-size: 11px; color: #4ecca3; margin-top: 4px; }
+        .add-author-btn { width: 100%; padding: 10px; background: #e94560; border: none; border-radius: 6px; color: white; cursor: pointer; margin-top: 10px; }
+
+        /* Task Monitor Section */
+        .task-monitor { margin-top: 20px; padding-top: 15px; border-top: 1px solid #0f3460; }
+        .task-monitor h2 { font-size: 14px; color: #4ecca3; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+        .task-monitor h2::before { content: '●'; color: #4ecca3; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+        .task-item { background: #1a1a2e; padding: 10px; margin-bottom: 8px; border-radius: 6px; font-size: 12px; }
+        .task-item .task-name { color: #eee; margin-bottom: 4px; display: flex; justify-content: space-between; }
+        .task-item .task-status { font-size: 11px; }
+        .task-item .task-status.processing { color: #f39c12; }
+        .task-item .task-status.completed { color: #4ecca3; }
+        .task-item .task-status.failed { color: #e94560; }
+        .task-progress { height: 3px; background: #0f3460; border-radius: 2px; margin-top: 6px; overflow: hidden; }
+        .task-progress-fill { height: 100%; background: linear-gradient(90deg, #4ecca3, #e94560); transition: width 0.3s; }
+        .no-tasks { color: #666; font-size: 12px; text-align: center; padding: 10px; }
+        .log-list { max-height: 120px; overflow-y: auto; margin-top: 10px; }
+        .log-item { font-size: 10px; color: #888; padding: 3px 0; border-bottom: 1px solid #0f3460; }
+        .log-item .log-time { color: #666; margin-right: 6px; }
+        .log-item.info { color: #4ecca3; }
+        .log-item.warning { color: #f39c12; }
+        .log-item.error { color: #e94560; }
+
+        /* Middle Column - Processing */
+        .middle-col { flex: 1; padding: 20px; display: flex; flex-direction: column; }
+        .middle-col h1 { font-size: 20px; margin-bottom: 15px; color: #e94560; }
+        .bili-section { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 12px; margin-bottom: 15px; }
+        .bili-section h3 { font-size: 13px; color: #4ecca3; margin-bottom: 8px; }
+        .bili-input-row { display: flex; gap: 8px; }
+        .bili-input-row input { flex: 1; padding: 8px; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 4px; color: #eee; font-size: 13px; }
+        .bili-download-btn { padding: 8px 15px; background: #4ecca3; border: none; border-radius: 4px; color: #1a1a2e; cursor: pointer; font-size: 13px; white-space: nowrap; }
+        .bili-download-btn:hover { background: #3db892; }
+        .bili-download-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .bili-status { font-size: 11px; color: #888; margin-top: 6px; display: none; }
+        .bili-status.active { display: block; }
+        .source-input { width: 100%; height: 200px; background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 15px; color: #eee; font-size: 14px; resize: none; margin-bottom: 15px; }
+        .source-input:focus { outline: none; border-color: #e94560; }
+        .controls { display: flex; gap: 10px; margin-bottom: 15px; }
+        .controls select { flex: 1; padding: 10px; background: #16213e; border: 1px solid #0f3460; border-radius: 6px; color: #eee; }
+        .controls input { flex: 1; padding: 10px; background: #16213e; border: 1px solid #0f3460; border-radius: 6px; color: #eee; }
+        .generate-btn { padding: 12px 30px; background: linear-gradient(135deg, #e94560, #0f3460); border: none; border-radius: 6px; color: white; cursor: pointer; font-size: 14px; }
+        .generate-btn:hover { opacity: 0.9; }
+        .generate-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .progress { margin-top: 10px; display: none; }
+        .progress-bar { height: 4px; background: #0f3460; border-radius: 2px; overflow: hidden; }
+        .progress-fill { height: 100%; background: #e94560; width: 0%; transition: width 0.3s; }
+        .progress-text { font-size: 12px; color: #888; margin-top: 5px; }
+
+        /* Right Column - Results */
+        .right-col { width: 350px; background: #16213e; padding: 20px; overflow-y: auto; border-left: 1px solid #0f3460; }
+        .right-col h2 { font-size: 16px; margin-bottom: 15px; color: #e94560; }
+        .result-box { background: #1a1a2e; border-radius: 8px; padding: 15px; margin-bottom: 15px; min-height: 150px; }
+        .result-box p { font-size: 13px; line-height: 1.6; white-space: pre-wrap; }
+        .score-display { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+        .score { font-size: 24px; color: #4ecca3; font-weight: bold; }
+        .score-label { font-size: 12px; color: #888; }
+        .copy-btn, .download-btn { padding: 8px 15px; background: #0f3460; border: none; border-radius: 4px; color: #eee; cursor: pointer; font-size: 12px; margin-right: 5px; }
+        .copy-btn:hover, .download-btn:hover { background: #e94560; }
+
+        /* Modal */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 100; }
+        .modal.active { display: flex; justify-content: center; align-items: center; }
+        .modal-content { background: #16213e; padding: 25px; border-radius: 10px; width: 400px; max-width: 90%; }
+        .modal-content h2 { margin-bottom: 15px; color: #e94560; }
+        .modal-content input, .modal-content textarea { width: 100%; padding: 10px; background: #1a1a2e; border: 1px solid #0f3460; border-radius: 6px; color: #eee; margin-bottom: 10px; }
+        .modal-content textarea { height: 150px; resize: none; }
+        .modal-content .btn-group { display: flex; gap: 10px; margin-top: 15px; }
+        .modal-content button { flex: 1; padding: 10px; border: none; border-radius: 6px; cursor: pointer; }
+        .modal-content .cancel-btn { background: #333; color: #eee; }
+        .modal-content .confirm-btn { background: #e94560; color: white; }
+
+        /* Toast */
+        .toast { position: fixed; bottom: 20px; right: 20px; background: #4ecca3; color: #1a1a2e; padding: 12px 20px; border-radius: 6px; display: none; z-index: 200; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Left Column - Author Library -->
+        <div class="left-col">
+            <div class="left-col-content">
+                <h2>作者人格库</h2>
+                <ul class="author-list" id="authorList"></ul>
+                <button class="add-author-btn" onclick="openAddModal()">+ 新建人格</button>
+            </div>
+
+            <!-- Task Monitor -->
+            <div class="task-monitor">
+                <h2>运行中的任务</h2>
+                <div id="taskList">
+                    <div class="no-tasks">暂无运行中的任务</div>
+                </div>
+                <div class="log-list" id="logList"></div>
+            </div>
+        </div>
+
+        <!-- Middle Column - Processing -->
+        <div class="middle-col">
+            <h1>短视频人格深度重构引擎</h1>
+
+            <!-- B站视频下载区 -->
+            <div class="bili-section">
+                <h3>B站视频链接提取ASR（支持多行）</h3>
+                <div class="bili-input-row">
+                    <input type="text" id="biliUrl" placeholder="输入B站视频链接，每行一个，支持BV号或完整URL">
+                    <button class="bili-download-btn" id="biliDownloadBtn" onclick="downloadBilibili()">下载并提取ASR</button>
+                </div>
+                <div class="bili-status" id="biliStatus"></div>
+            </div>
+
+            <textarea class="source-input" id="sourceText" placeholder="输入原始素材文案..."></textarea>
+            <div class="controls">
+                <select id="authorSelect">
+                    <option value="">选择作者人格</option>
+                </select>
+                <input type="text" id="lockedTerms" placeholder="术语锚点（用逗号分隔）">
+            </div>
+            <button class="generate-btn" id="generateBtn" onclick="generate()">开始重写</button>
+            <div class="progress" id="progress">
+                <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+                <p class="progress-text" id="progressText">准备中...</p>
+            </div>
+        </div>
+
+        <!-- Right Column - Results -->
+        <div class="right-col">
+            <h2>生成结果</h2>
+            <div class="score-display">
+                <div><span class="score" id="scoreValue">--</span><br><span class="score-label">一致性评分</span></div>
+                <div>
+                    <button class="copy-btn" onclick="copyResult()">复制</button>
+                    <button class="download-btn" onclick="downloadResult()">下载</button>
+                </div>
+            </div>
+            <div class="result-box">
+                <p id="resultText">生成的文案将显示在这里...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Author Modal -->
+    <div class="modal" id="addModal">
+        <div class="modal-content">
+            <h2>新建人格画像</h2>
+            <input type="text" id="authorName" placeholder="作者名称">
+            <textarea id="videoUrls" placeholder="输入 B站视频链接（多行支持，每行一个，可留空）" style="height:60px;margin-bottom:8px;"></textarea>
+            <textarea id="sourceTexts" placeholder="输入 ASR 原文（多篇用空行分隔，至少3篇）"></textarea>
+            <div class="btn-group">
+                <button class="cancel-btn" onclick="closeAddModal()">取消</button>
+                <button class="confirm-btn" onclick="createAuthor()">创建</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast">操作成功</div>
+
+    <script>
+        let authors = [];
+        let selectedAuthorId = null;
+        let currentResult = '';
+
+        // Load authors on page load
+        document.addEventListener('DOMContentLoaded', loadAuthors);
+
+        async function loadAuthors() {
+            try {
+                const resp = await fetch('/v1/personas');
+                const data = await resp.json();
+                authors = data.personas || [];
+                renderAuthorList();
+                updateAuthorSelect();
+            } catch (e) {
+                console.error('Failed to load authors:', e);
+            }
+        }
+
+        async function downloadBilibili() {
+            const urlInput = document.getElementById('biliUrl').value.trim();
+            if (!urlInput) {
+                showToast('请输入B站视频链接');
+                return;
+            }
+
+            const btn = document.getElementById('biliDownloadBtn');
+            const status = document.getElementById('biliStatus');
+
+            btn.disabled = true;
+            status.classList.add('active');
+            status.textContent = '正在解析链接...';
+
+            try {
+                // 判断是单条还是多条（按换行符分割）
+                const urls = urlInput.split('\n').map(u => u.trim()).filter(u => u);
+
+                // 提交B站ASR任务
+                const resp = await fetch('/v1/asr/from-url', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ urls, name: null })
+                });
+                const data = await resp.json();
+
+                if (data.task_id) {
+                    status.textContent = data.message || '正在处理...';
+                    pollBilibiliStatus(data.task_id);
+                } else {
+                    showToast('提交失败');
+                    btn.disabled = false;
+                    status.classList.remove('active');
+                }
+            } catch (e) {
+                showToast('提交失败: ' + e.message);
+                btn.disabled = false;
+                status.classList.remove('active');
+            }
+        }
+
+        async function pollBilibiliStatus(taskId) {
+            const status = document.getElementById('biliStatus');
+            const btn = document.getElementById('biliDownloadBtn');
+
+            const check = async () => {
+                try {
+                    const resp = await fetch(`/v1/asr/tasks/${taskId}/status`);
+                    const data = await resp.json();
+
+                    if (data.history && data.history.length > 0) {
+                        const latest = data.history[data.history.length - 1];
+                        const status_str = latest.status || '';
+
+                        if (status_str.startsWith('processing')) {
+                            // 批量处理中
+                            if (latest.phase === 'downloading') {
+                                status.textContent = `[${latest.status}] ${latest.url} - 下载中 ${latest.progress?.toFixed(0) || 0}%`;
+                            } else if (latest.phase === 'transcribing') {
+                                status.textContent = `[${latest.status}] 正在转写...`;
+                            } else {
+                                status.textContent = `[${latest.status}] ${latest.url}`;
+                            }
+                            setTimeout(check, 3000);
+                        } else if (status_str === 'completed') {
+                            // ASR完成，填充到文本框
+                            if (data.best_text) {
+                                // 将合并的文本分割并显示
+                                const texts = data.best_text.split('|||BILI_ASR_SPLIT|||');
+                                document.getElementById('sourceText').value = texts.join('\n\n---\n\n');
+                                showToast(`ASR提取成功 (${latest.completed}/${latest.total})`);
+                            } else {
+                                showToast('ASR提取完成，但无文本内容');
+                            }
+                            btn.disabled = false;
+                            status.classList.remove('active');
+                        } else if (status_str === 'failed') {
+                            showToast('处理失败: ' + (latest.error || '未知错误'));
+                            btn.disabled = false;
+                            status.classList.remove('active');
+                        } else {
+                            status.textContent = `[${status_str}]`;
+                            setTimeout(check, 3000);
+                        }
+                    } else {
+                        setTimeout(check, 3000);
+                    }
+                } catch (e) {
+                    setTimeout(check, 3000);
+                }
+            };
+
+            check();
+        }
+
+        function renderAuthorList() {
+            const list = document.getElementById('authorList');
+            list.innerHTML = authors.map(a => `
+                <li class="author-item ${a.id === selectedAuthorId ? 'selected' : ''}" onclick="selectAuthor('${a.id}')">
+                    <h3>${a.name}</h3>
+                    <p>创建于 ${new Date(a.created_at).toLocaleDateString()}</p>
+                    <p class="verbal-tics">${a.verbal_tics.slice(0,3).join(', ') || '暂无口头禅'}</p>
+                </li>
+            `).join('');
+        }
+
+        function updateAuthorSelect() {
+            const select = document.getElementById('authorSelect');
+            select.innerHTML = '<option value="">选择作者人格</option>' +
+                authors.map(a => `<option value="${a.id}">${a.name}</option>`).join('');
+        }
+
+        function selectAuthor(id) {
+            selectedAuthorId = id;
+            document.getElementById('authorSelect').value = id;
+            renderAuthorList();
+        }
+
+        function openAddModal() {
+            document.getElementById('addModal').classList.add('active');
+        }
+
+        function closeAddModal() {
+            document.getElementById('addModal').classList.remove('active');
+            document.getElementById('authorName').value = '';
+            document.getElementById('sourceTexts').value = '';
+            document.getElementById('videoUrls').value = '';
+        }
+
+        async function createAuthor() {
+            const name = document.getElementById('authorName').value.trim();
+            const texts = document.getElementById('sourceTexts').value.split('\n\n').filter(t => t.trim());
+            const videoUrlsInput = document.getElementById('videoUrls').value.trim();
+            const videoUrls = videoUrlsInput ? videoUrlsInput.split('\n').map(u => u.trim()).filter(u => u) : null;
+
+            if (!name) {
+                showToast('请填写作者名称');
+                return;
+            }
+            if ((!texts || texts.length < 1) && (!videoUrls || videoUrls.length < 1)) {
+                showToast('请提供 ASR 原文或 B站视频链接');
+                return;
+            }
+
+            try {
+                const payload = { name };
+                if (videoUrls && videoUrls.length > 0) {
+                    payload.video_urls = videoUrls;
+                }
+                if (texts && texts.length > 0) {
+                    payload.source_texts = texts;
+                }
+                const resp = await fetch('/v1/personas', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await resp.json();
+                if (data.id || data.task_id) {
+                    showToast(videoUrls ? '人格创建成功，ASR 处理中...' : '人格创建成功');
+                    closeAddModal();
+                    loadAuthors();
+                } else {
+                    showToast('创建失败: ' + (data.detail?.message || '未知错误'));
+                }
+            } catch (e) {
+                showToast('创建失败: ' + e.message);
+            }
+        }
+
+        async function generate() {
+            const sourceText = document.getElementById('sourceText').value.trim();
+            const authorId = document.getElementById('authorSelect').value;
+
+            if (!sourceText) { showToast('请输入原始素材'); return; }
+            if (!authorId) { showToast('请选择作者人格'); return; }
+
+            const btn = document.getElementById('generateBtn');
+            const progress = document.getElementById('progress');
+
+            btn.disabled = true;
+            progress.style.display = 'block';
+            document.getElementById('progressText').textContent = '正在提交任务...';
+
+            try {
+                // Submit batch rewrite task
+                const resp = await fetch('/v1/process/batch', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        source_texts: [sourceText],
+                        persona_ids: [authorId],
+                        locked_terms: document.getElementById('lockedTerms').value.split(',').map(t => t.trim()).filter(t => t)
+                    })
+                });
+                const data = await resp.json();
+
+                if (data.task_ids && data.task_ids.length > 0) {
+                    pollTaskStatus(data.task_ids[0]);
+                } else {
+                    showToast('提交失败');
+                    btn.disabled = false;
+                    progress.style.display = 'none';
+                }
+            } catch (e) {
+                showToast('提交失败: ' + e.message);
+                btn.disabled = false;
+                progress.style.display = 'none';
+            }
+        }
+
+        async function pollTaskStatus(taskId) {
+            const progressText = document.getElementById('progressText');
+            const progressFill = document.getElementById('progressFill');
+
+            const check = async () => {
+                try {
+                    const resp = await fetch(`/v1/tasks/${taskId}/status`);
+                    const data = await resp.json();
+
+                    progressText.textContent = `迭代 ${data.iteration}/5 | 得分: ${data.current_score}`;
+                    progressFill.style.width = `${(data.iteration / 5) * 100}%`;
+
+                    if (data.status === 'completed' || data.status === 'completed_below_threshold') {
+                        currentResult = data.best_text;
+                        document.getElementById('resultText').textContent = currentResult;
+                        document.getElementById('scoreValue').textContent = data.best_score.toFixed(1);
+                        document.getElementById('generateBtn').disabled = false;
+                        document.getElementById('progress').style.display = 'none';
+                        showToast('生成完成');
+                    } else if (data.status === 'failed') {
+                        showToast('生成失败');
+                        document.getElementById('generateBtn').disabled = false;
+                        document.getElementById('progress').style.display = 'none';
+                    } else {
+                        setTimeout(check, 2000);
+                    }
+                } catch (e) {
+                    setTimeout(check, 2000);
+                }
+            };
+
+            check();
+        }
+
+        function copyResult() {
+            if (currentResult) {
+                navigator.clipboard.writeText(currentResult);
+                showToast('已复制到剪贴板');
+            }
+        }
+
+        function downloadResult() {
+            if (!currentResult) return;
+            const blob = new Blob([currentResult], { type: 'text/plain' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'rewritten_text.txt';
+            a.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.textContent = msg;
+            toast.style.display = 'block';
+            setTimeout(() => toast.style.display = 'none', 3000);
+        }
+
+        // ========== Task Monitor ==========
+        let taskMonitorInterval = null;
+        const MAX_LOG_ITEMS = 20;
+
+        function startTaskMonitor() {
+            pollTaskMonitor();
+            if (!taskMonitorInterval) {
+                taskMonitorInterval = setInterval(pollTaskMonitor, 5000); // Poll every 5s
+            }
+        }
+
+        async function pollTaskMonitor() {
+            try {
+                const resp = await fetch('/v1/personas');
+                const data = await resp.json();
+                const personas = data.personas || [];
+
+                // Filter active processing tasks
+                const activeTasks = personas.filter(p =>
+                    p.raw_json && p.raw_json.status === 'processing'
+                );
+
+                renderTaskList(activeTasks);
+            } catch (e) {
+                console.error('Failed to poll task monitor:', e);
+            }
+        }
+
+        function renderTaskList(tasks) {
+            const taskList = document.getElementById('taskList');
+
+            if (tasks.length === 0) {
+                taskList.innerHTML = '<div class="no-tasks">暂无运行中的任务</div>';
+                return;
+            }
+
+            taskList.innerHTML = tasks.map(task => {
+                const progress = task.raw_json.progress || '0/0';
+                const [completed, total] = progress.split('/').map(Number);
+                const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+                const createdAt = new Date(task.created_at);
+                const timeStr = `${createdAt.getHours().toString().padStart(2,'0')}:${createdAt.getMinutes().toString().padStart(2,'0')}:${createdAt.getSeconds().toString().padStart(2,'0')}`;
+
+                return `
+                    <div class="task-item" data-id="${task.id}">
+                        <div class="task-name">
+                            <span>${escapeHtml(task.name)}</span>
+                            <span class="task-status processing">处理中</span>
+                        </div>
+                        <div class="task-status processing">${progress} (${pct}%)</div>
+                        <div class="task-progress">
+                            <div class="task-progress-fill" style="width: ${pct}%"></div>
+                        </div>
+                        <div class="task-status" style="color:#666;font-size:10px;">开始: ${timeStr}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function addLog(message, level = 'info') {
+            const logList = document.getElementById('logList');
+            const now = new Date();
+            const timeStr = `${now.getHours().toString().padStart(2,'0')}:${now.getMinutes().toString().padStart(2,'0')}:${now.getSeconds().toString().padStart(2,'0')}`;
+
+            const logItem = document.createElement('div');
+            logItem.className = `log-item ${level}`;
+            logItem.innerHTML = `<span class="log-time">${timeStr}</span>${escapeHtml(message)}`;
+
+            logList.insertBefore(logItem, logList.firstChild);
+
+            // Keep only MAX_LOG_ITEMS
+            while (logList.children.length > MAX_LOG_ITEMS) {
+                logList.removeChild(logList.lastChild);
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Override createAuthor to add log entry
+        const originalCreateAuthor = createAuthor;
+        createAuthor = async function() {
+            const name = document.getElementById('authorName').value.trim();
+            const videoUrlsInput = document.getElementById('videoUrls').value.trim();
+
+            if (videoUrlsInput) {
+                addLog(`提交视频任务: ${name}`, 'info');
+            }
+
+            await originalCreateAuthor();
+        };
+
+        // Start task monitor on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            loadAuthors();
+            startTaskMonitor();
+            addLog('页面加载完成', 'info');
+        });
+    </script>
+</body>
+</html>

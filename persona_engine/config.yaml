@@ -1,0 +1,42 @@
+# 短视频人格深度重构与洗稿引擎 - 配置文件示例
+
+# MiniMax API 配置
+minimax:
+  api_key: "sk-cp-h4Aklfj0aygDDIH2Pc7o24a0hDlTzyKE0q_CHsu-LGZ81cw-OmC5qQWdMhiIO5BHD7kRVvHmdXfSho6lIxAwAteU-vc6KidVOVTlL2OfF0XJeFk_I6EXHjE"
+  base_url: "https://api.minimax.chat/v1"
+  model: "MiniMax-M2.7"
+  timeout: 60
+
+# Whisper ASR 配置
+whisper:
+  model_size: "base"  # 使用 base 模型 (~140MB) 替代 large-v3 (~3GB)
+  language: "zh"
+  device: "cpu"
+  compute_type: "int8"
+  vad_filter: true
+  vad_parameters:
+    min_silence_duration_ms: 500
+  word_timestamps: true
+
+# 数据库配置
+database:
+  path: "C:/Users/26458/AppData/Local/Temp/persona_engine.db"
+  echo: false
+
+# 审计系统配置
+audit:
+  min_consistency_score: 90.0
+  max_iterations: 5
+  timeout_seconds: 300
+  verbal_tic_weight: 0.08
+  grammar_weight: 0.20
+  term_preservation_weight: 0.30
+  rhythm_weight: 0.42
+
+# 应用配置
+app:
+  host: "127.0.0.1"
+  port: 8080
+  debug: false
+  data_dir: "data"
+  watch_folder: "watch"
