@@ -40,6 +40,17 @@ class TaskRegistry:
         """获取任务引用"""
         return self._tasks.get(task_id)
 
+    def cancel(self, task_id: str) -> bool:
+        """取消指定任务"""
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        if not task.done():
+            task.cancel()
+            logger.info(f"Task cancelled: {task_id}")
+            return True
+        return False
+
     def cancel_all(self):
         """取消所有任务（shutdown时调用）"""
         logger.info(f"Cancelling {len(self._tasks)} background tasks...")

@@ -153,6 +153,7 @@ class Database:
                     best_score FLOAT NOT NULL DEFAULT 0.0,
                     best_iteration INTEGER NOT NULL DEFAULT 0,
                     history_versions JSON NOT NULL DEFAULT '[]',
+                    intermediate_results JSON NOT NULL DEFAULT '[]',
                     error_message TEXT,
                     created_at DATETIME NOT NULL,
                     completed_at DATETIME
@@ -241,6 +242,7 @@ class RewriteTaskModel(Base):
     best_score: Mapped[float] = mapped_column(Float, default=0.0)
     best_iteration: Mapped[int] = mapped_column(Integer, default=0)
     history_versions: Mapped[list] = mapped_column(JSON, default=list)
+    intermediate_results: Mapped[list] = mapped_column(JSON, default=list)
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)

@@ -448,6 +448,71 @@ class TaskRepository:
                 details={"task_id": task_id},
             )
 
+    async def mark_running_as_interrupted(self) -> int:
+        """
+        将所有 running 状态的任务标记为 interrupted
+
+        服务重启时调用，用于检测中断的任务
+
+        Returns:
+            被标记的任务数量
+        """
+        try:
+            async with self.db.session() as session:
+                from .database import RewriteTaskModel
+
+                result = await session.execute(
+                    update(RewriteTaskModel)
+                    .where(RewriteTaskModel.status == "running")
+                    .values(status="interrupted")
+                )
+                await session.commit()
+                count = result.rowcount
+
+            if count > 0:
+                logger.info(f"Marked {count} running tasks as interrupted")
+            return count
+
+        except Exception as e:
+            logger.error(f"Failed to mark running tasks as interrupted: {e}")
+            return 0
+
+    async def get_interrupted_tasks(self) -> list[dict]:
+        """
+        获取所有中断的任务
+
+        Returns:
+            中断任务列表
+        """
+        try:
+            async with self.db.session() as session:
+                from .database import RewriteTaskModel
+
+                result = await session.execute(
+                    select(RewriteTaskModel).where(
+                        RewriteTaskModel.status == "interrupted"
+                    )
+                )
+                models = result.scalars().all()
+
+            return [
+                {
+                    "task_id": m.id,
+                    "source_text": m.source_text[:100] + "..." if len(m.source_text) > 100 else m.source_text,
+                    "status": m.status,
+                    "intermediate_results_count": len(m.intermediate_results or []),
+                    "history_versions": m.history_versions,
+                    "created_at": m.created_at.isoformat(),
+                }
+                for m in models
+            ]
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get interrupted tasks: {str(e)}",
+                operation="get_interrupted_tasks",
+            )
+
     async def update_result(
         self,
         task_id: str,
@@ -456,22 +521,27 @@ class TaskRepository:
         best_iteration: int,
         history_versions: list,
         status: str = "running",
+        intermediate_results: list | None = None,
     ) -> bool:
         """更新任务结果"""
         try:
             async with self.db.session() as session:
                 from .database import RewriteTaskModel
 
+                update_values = {
+                    "best_text": best_text,
+                    "best_score": best_score,
+                    "best_iteration": best_iteration,
+                    "history_versions": history_versions,
+                    "status": status,
+                }
+                if intermediate_results is not None:
+                    update_values["intermediate_results"] = intermediate_results
+
                 await session.execute(
                     update(RewriteTaskModel)
                     .where(RewriteTaskModel.id == task_id)
-                    .values(
-                        best_text=best_text,
-                        best_score=best_score,
-                        best_iteration=best_iteration,
-                        history_versions=history_versions,
-                        status=status,
-                    )
+                    .values(**update_values)
                 )
                 await session.commit()
 

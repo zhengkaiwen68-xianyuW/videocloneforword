@@ -622,6 +622,49 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=500, detail=e.to_dict())
 
 
+@router.delete("/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    """
+    DELETE /v1/tasks/{task_id}
+
+    取消正在运行的任务
+    """
+    try:
+        # 先从task_registry取消asyncio任务
+        cancelled = task_registry.cancel(task_id)
+
+        # 更新数据库状态
+        await task_repo.complete(task_id, status="cancelled")
+
+        return {
+            "task_id": task_id,
+            "cancelled": cancelled,
+            "message": "任务已取消" if cancelled else "任务不存在或已结束",
+        }
+
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail={"error": "Task not found", "task_id": task_id})
+    except PersonaEngineException as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+
+
+@router.get("/tasks/interrupted")
+async def get_interrupted_tasks():
+    """
+    GET /v1/tasks/interrupted
+
+    获取所有被中断的任务（服务器重启前正在运行的任务）
+    """
+    try:
+        tasks = await task_repo.get_interrupted_tasks()
+        return {
+            "count": len(tasks),
+            "tasks": tasks,
+        }
+    except PersonaEngineException as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+
+
 @router.post("/asr/from-url", response_model=BilibiliASRResponse)
 async def bilibili_asr(request: BilibiliASRRequest):
     """
@@ -797,6 +840,22 @@ async def run_bilibili_asr_task(task_id: str, urls: list[str], name: str | None)
                 }
                 all_results.append(video_result)
 
+                # 立即保存中间结果（断点续传）
+                await task_repo.update_result(
+                    task_id=task_id,
+                    best_text="",
+                    best_score=0.0,
+                    best_iteration=0,
+                    history_versions=[{
+                        "status": f"processing ({i+1}/{total})",
+                        "url": url,
+                        "phase": "completed",
+                        "progress": ((i + 1) / total) * 100,
+                    }],
+                    status="running",
+                    intermediate_results=all_results.copy(),
+                )
+
                 completed += 1
                 logger.info(f"Task {task_id} [{i+1}/{total}] completed: {len(asr_result.text)} chars")
 
@@ -965,9 +1024,8 @@ async def run_persona_from_videos_task(
                 completed += 1
                 logger.info(f"Task {task_id} [{i+1}/{total}]: Transcribed {len(asr_result.text)} chars")
 
-                # 定期更新数据库进度（每3个视频或完成时）
-                if completed % 3 == 0 or completed == total:
-                    await _update_persona_progress(persona_id, completed, total)
+                # 每完成1个视频即更新进度
+                await _update_persona_progress(persona_id, completed, total)
 
             except asyncio.TimeoutError:
                 failed += 1

@@ -67,6 +67,13 @@ def get_app():
             if stale_count > 0:
                 logger.warning(f"Cleaned up {stale_count} stale processing tasks from previous session")
 
+            # 标记中断的任务（服务器正常关闭时任务应已正确结束）
+            from persona_engine.storage.persona_repo import TaskRepository
+            task_repo = TaskRepository()
+            interrupted_count = await task_repo.mark_running_as_interrupted()
+            if interrupted_count > 0:
+                logger.warning(f"Marked {interrupted_count} interrupted tasks")
+
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
 
@@ -118,7 +125,7 @@ def get_app():
 
     @app.get("/")
     async def web_ui():
-        html_path = Path(__file__).parent / "api" / "web_ui.html"
+        html_path = Path(__file__).parent / "persona_engine" / "api" / "web_ui.html"
         if html_path.exists():
             return FileResponse(str(html_path))
         return {"message": "Web UI not found"}
