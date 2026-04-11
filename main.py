@@ -12,7 +12,8 @@ if getattr(sys, 'frozen', False):
     app_dir = sys._MEIPASS
     base_dir = os.path.dirname(sys.executable)
 else:
-    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    # 普通运行环境 - main.py在项目根目录下，所以只需要dirname一次
+    app_dir = os.path.dirname(os.path.abspath(__file__))
     base_dir = app_dir
 
 sys.path.insert(0, base_dir)

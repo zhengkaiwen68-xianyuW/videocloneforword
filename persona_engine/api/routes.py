@@ -8,6 +8,7 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -36,6 +37,12 @@ from persona_engine.core.types import (
 from persona_engine.core.task_registry import task_registry
 from persona_engine.storage.persona_repo import PersonaRepository, TaskRepository
 from persona_engine.asr.personality_extractor import PersonalityExtractor
+from persona_engine.asr.bilibili_downloader import (
+    BilibiliSpaceDownloader,
+    is_valid_bilibili_space_url,
+    extract_uid_from_space_url,
+    build_video_url_from_bv,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -189,15 +196,55 @@ async def create_persona(request: PersonaCreateRequest):
     创建新人格（上传 ASR 文本或视频链接进行人格孵化）
     """
     try:
-        # 检查参数：source_texts 和 video_urls 至少要有一个
+        # 检查参数：source_texts、video_urls、space_url 至少要有一个
         has_texts = request.source_texts and len(request.source_texts) > 0
         has_videos = request.video_urls and len(request.video_urls) > 0
+        has_space = bool(request.space_url)
 
-        if not has_texts and not has_videos:
+        if not has_texts and not has_videos and not has_space:
             raise ValidationError(
-                message="Either source_texts or video_urls is required",
-                field="source_texts/video_urls",
+                message="At least one of source_texts, video_urls, or space_url is required",
+                field="source_texts/video_urls/space_url",
             )
+
+        # 如果提供了 space_url，先获取视频列表
+        if has_space and not has_videos and not has_texts:
+            # 验证空间链接格式
+            if not is_valid_bilibili_space_url(request.space_url):
+                raise ValidationError(
+                    message="Invalid Bilibili space URL format",
+                    field="space_url",
+                )
+
+            # 从空间链接提取UID
+            uid = extract_uid_from_space_url(request.space_url)
+            if not uid:
+                raise ValidationError(
+                    message="Failed to extract UID from space URL",
+                    field="space_url",
+                )
+
+            # 获取UP主空间视频列表
+            logger.info(f"Fetching videos from space for UID: {uid}")
+            space_downloader = BilibiliSpaceDownloader()
+            space_videos = await space_downloader.get_uploader_videos(
+                uid=uid,
+                limit=30,
+            )
+
+            if not space_videos:
+                raise ValidationError(
+                    message="No videos found in this space",
+                    field="space_url",
+                )
+
+            # 将BV号转换为完整URL
+            video_urls = [build_video_url_from_bv(v.bv_id) for v in space_videos]
+            logger.info(f"Got {len(video_urls)} video URLs from space {uid}")
+
+            # 更新请求的video_urls，继续使用现有流程
+            request.video_urls = video_urls
+            has_videos = True
 
         # 如果提供了视频链接，使用后台任务
         if has_videos and not has_texts:
@@ -672,6 +719,17 @@ async def bilibili_asr(request: BilibiliASRRequest):
 
     输入B站视频链接，自动下载并提取ASR文本
     支持单条或多条链接（多行）
+
+    ==========================================================================
+    B站下载入口 #1 - ASR文本提取
+    ==========================================================================
+    调用链: bilibili_asr() -> run_bilibili_asr_task() -> BilibiliDownloader
+    反爬风险: 中等（单视频请求，触发概率较低）
+
+    后续统一优化请联系：
+    - BilibiliDownloader 类 (bilibili_downloader.py)
+    - get_uploader_videos() 如需空间列表获取优化
+    ==========================================================================
     """
     from persona_engine.asr.bilibili_downloader import (
         BilibiliDownloader,
@@ -739,10 +797,15 @@ async def run_bilibili_asr_task(task_id: str, urls: list[str], name: str | None)
     """
     后台执行B站视频批量下载和ASR
 
-    Args:
-        task_id: 任务ID
-        urls: B站视频链接列表
-        name: 可选的名称
+    ==========================================================================
+    B站下载入口 #2 - ASR后台任务（被 bilibili_asr 调用）
+    ==========================================================================
+    调用链: run_bilibili_asr_task() -> BilibiliDownloader.download_and_extract_audio()
+    反爬风险: 中等（批量请求，建议添加请求间隔）
+
+    进度追踪: 通过 task_repo.update_result() 更新 history_versions
+    统一优化请联系: BilibiliDownloader 类 (bilibili_downloader.py)
+    ==========================================================================
     """
     from persona_engine.asr.bilibili_downloader import (
         BilibiliDownloader,
@@ -944,7 +1007,16 @@ async def _run_persona_from_videos_task_with_tracking(
         task_registry.unregister(task_id)
 
 
-async def _update_persona_progress(persona_id: str, completed: int, total: int):
+async def _update_persona_progress(
+    persona_id: str,
+    completed: int,
+    total: int,
+    current_index: int | None = None,
+    current_phase: str = "downloading",
+    current_progress: float = 0.0,
+    current_bv_id: str = None,
+    failed: int = 0,
+):
     """
     更新人格进度到数据库
 
@@ -952,6 +1024,11 @@ async def _update_persona_progress(persona_id: str, completed: int, total: int):
         persona_id: 人格ID
         completed: 已完成视频数
         total: 视频总数
+        current_index: 当前处理的视频索引（从0开始）
+        current_phase: 当前阶段 (downloading/transcribing)
+        current_progress: 当前视频的进度百分比
+        current_bv_id: 当前处理的视频BV号
+        failed: 失败的视频数
     """
     try:
         raw_json = {
@@ -960,7 +1037,18 @@ async def _update_persona_progress(persona_id: str, completed: int, total: int):
             "progress": f"{completed}/{total}",
             "completed_videos": completed,
             "total_videos": total,
+            "failed_videos": failed,
         }
+
+        # 添加当前视频详细信息
+        if current_index is not None:
+            raw_json["current_video"] = {
+                "index": current_index,
+                "phase": current_phase,
+                "progress": current_progress,
+                "bv_id": current_bv_id,
+            }
+
         await persona_repo.update(persona_id, {"raw_json": raw_json})
     except Exception as e:
         logger.warning(f"Failed to update persona progress: {e}")
@@ -974,11 +1062,18 @@ async def run_persona_from_videos_task(
     """
     后台任务：从视频创建新人格
 
-    Args:
-        task_id: 任务ID
-        persona_id: 人格ID
-        video_urls: 视频链接列表
+    ==========================================================================
+    B站下载入口 #3 - 创建人格后台任务
+    ==========================================================================
+    调用链: create_persona() -> run_persona_from_videos_task() -> BilibiliDownloader
+    支持入口: video_urls (直接链接) 和 space_url (通过 BilibiliSpaceDownloader 转换)
+    反爬风险: 高（30个视频批量处理，极易触发412）
+
+    进度追踪: 通过 _update_persona_progress() 实时更新到 personas.raw_json
+    统一优化请联系: BilibiliDownloader 类 (bilibili_downloader.py)
+    ==========================================================================
     """
+    import re as regex_module
     from persona_engine.asr.bilibili_downloader import (
         BilibiliDownloader,
         VIDEO_SPLIT_MARKER,
@@ -992,6 +1087,34 @@ async def run_persona_from_videos_task(
     completed = 0
     failed = 0
 
+    def extract_bv_from_url(url: str) -> str:
+        """从URL提取BV号"""
+        match = regex_module.search(r'BV[\w]+', url)
+        return match.group(0) if match else url
+
+    def create_progress_callback(persona_id: str, total: int, i: int, bv_id: str):
+        """创建进度回调函数"""
+        last_update_time = [0]  # 用于限制更新频率
+
+        def progress_callback(progress: float, status: str):
+            # 每2秒更新一次进度，避免过于频繁的数据库写入
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_update_time[0] < 2.0:
+                return
+            last_update_time[0] = current_time
+
+            asyncio.create_task(_update_persona_progress(
+                persona_id=persona_id,
+                completed=completed,
+                total=total,
+                current_index=i,
+                current_phase="downloading",
+                current_progress=progress,
+                current_bv_id=bv_id,
+                failed=failed,
+            ))
+        return progress_callback
+
     try:
         total = len(video_urls)
         logger.info(f"Task {task_id}: Starting persona creation from {total} videos")
@@ -1000,15 +1123,44 @@ async def run_persona_from_videos_task(
         VIDEO_TIMEOUT_SECONDS = 300  # 5分钟超时
 
         for i, url in enumerate(video_urls):
+            bv_id = extract_bv_from_url(url)
+
             try:
                 logger.info(f"Task {task_id} [{i+1}/{total}]: Downloading {url}")
 
+                # 更新进度为开始下载
+                await _update_persona_progress(
+                    persona_id=persona_id,
+                    completed=completed,
+                    total=total,
+                    current_index=i,
+                    current_phase="downloading",
+                    current_progress=0.0,
+                    current_bv_id=bv_id,
+                    failed=failed,
+                )
+
+                # 创建进度回调
+                progress_cb = create_progress_callback(persona_id, total, i, bv_id)
+
                 # 下载视频并提取音频（带超时保护）
                 audio_path = await asyncio.wait_for(
-                    downloader.download_and_extract_audio(url),
+                    downloader.download_and_extract_audio(url, progress_callback=progress_cb),
                     timeout=VIDEO_TIMEOUT_SECONDS,
                 )
                 audio_paths.append(audio_path)
+
+                # 更新进度为转写阶段
+                await _update_persona_progress(
+                    persona_id=persona_id,
+                    completed=completed,
+                    total=total,
+                    current_index=i,
+                    current_phase="transcribing",
+                    current_progress=50.0,
+                    current_bv_id=bv_id,
+                    failed=failed,
+                )
 
                 # 执行ASR转写（带超时保护）
                 asr_result = await asyncio.wait_for(
@@ -1019,13 +1171,23 @@ async def run_persona_from_videos_task(
                 all_results.append({
                     "index": i,
                     "url": url,
+                    "bv_id": bv_id,
                     "text": asr_result.text,
                 })
                 completed += 1
                 logger.info(f"Task {task_id} [{i+1}/{total}]: Transcribed {len(asr_result.text)} chars")
 
                 # 每完成1个视频即更新进度
-                await _update_persona_progress(persona_id, completed, total)
+                await _update_persona_progress(
+                    persona_id=persona_id,
+                    completed=completed,
+                    total=total,
+                    current_index=i,
+                    current_phase="completed",
+                    current_progress=100.0,
+                    current_bv_id=bv_id,
+                    failed=failed,
+                )
 
             except asyncio.TimeoutError:
                 failed += 1
@@ -1033,16 +1195,40 @@ async def run_persona_from_videos_task(
                 all_results.append({
                     "index": i,
                     "url": url,
+                    "bv_id": bv_id,
                     "error": f"Timeout after {VIDEO_TIMEOUT_SECONDS}s",
                 })
+                # 更新失败进度
+                await _update_persona_progress(
+                    persona_id=persona_id,
+                    completed=completed,
+                    total=total,
+                    current_index=i,
+                    current_phase="failed",
+                    current_progress=0.0,
+                    current_bv_id=bv_id,
+                    failed=failed,
+                )
             except Exception as e:
                 failed += 1
                 logger.error(f"Task {task_id} [{i+1}/{total}] failed: {e}")
                 all_results.append({
                     "index": i,
                     "url": url,
+                    "bv_id": bv_id,
                     "error": str(e),
                 })
+                # 更新失败进度
+                await _update_persona_progress(
+                    persona_id=persona_id,
+                    completed=completed,
+                    total=total,
+                    current_index=i,
+                    current_phase="failed",
+                    current_progress=0.0,
+                    current_bv_id=bv_id,
+                    failed=failed,
+                )
 
         # 构建ASR文本
         final_texts = [r["text"] for r in all_results if "text" in r]
@@ -1135,10 +1321,15 @@ async def run_persona_upgrade_task(
     """
     后台任务：追加视频到已有人格并重新计算
 
-    Args:
-        task_id: 任务ID
-        persona_id: 人格ID
-        video_urls: 视频链接列表
+    ==========================================================================
+    B站下载入口 #4 - 追加视频后台任务
+    ==========================================================================
+    调用链: add_videos_to_persona() -> run_persona_upgrade_task() -> BilibiliDownloader
+    反爬风险: 中等（批量请求，取决于追加视频数量）
+
+    注意: 此函数目前缺少详细进度追踪（TODO: 统一进度追踪机制）
+    统一优化请联系: BilibiliDownloader 类 (bilibili_downloader.py)
+    ==========================================================================
     """
     from persona_engine.asr.bilibili_downloader import (
         BilibiliDownloader,
@@ -1292,3 +1483,138 @@ async def health_check():
         "database": "connected" if db_healthy else "disconnected",
         "timestamp": datetime.now().isoformat(),
     }
+
+
+# ========== B站配置路由 ==========
+
+class BilibiliConfigResponse(BaseModel):
+    """B站配置响应"""
+    cookie: str = ""
+    access_token: str = ""
+    min_interval: float = 3.0
+    max_interval: float = 10.0
+    delay_per_page: float = 5.0
+    max_retries: int = 5
+    retry_base_delay: float = 2.0
+    user_agent: str = ""
+    api_mode: str = "web"
+
+
+class BilibiliConfigUpdateRequest(BaseModel):
+    """B站配置更新请求"""
+    cookie: str | None = None
+    access_token: str | None = None
+    min_interval: float | None = None
+    max_interval: float | None = None
+    delay_per_page: float | None = None
+    max_retries: int | None = None
+    retry_base_delay: float | None = None
+    user_agent: str | None = None
+    api_mode: str | None = None
+
+
+@router.get("/config/bilibili", response_model=BilibiliConfigResponse)
+async def get_bilibili_config():
+    """
+    GET /v1/config/bilibili
+
+    获取B站下载配置（不包含敏感信息明文）
+    参考BBDown: https://github.com/nilaoda/BBDown
+    """
+    try:
+        from persona_engine.core.config import config
+        bili = config.bilibili
+
+        # 遮蔽敏感信息
+        masked_cookie = bili.cookie[:20] + "..." if len(bili.cookie) > 20 else ("***" if bili.cookie else "")
+
+        return BilibiliConfigResponse(
+            cookie=masked_cookie,
+            access_token=bili.access_token[:10] + "..." if len(bili.access_token) > 10 else ("***" if bili.access_token else ""),
+            min_interval=bili.min_interval,
+            max_interval=bili.max_interval,
+            delay_per_page=bili.delay_per_page,
+            max_retries=bili.max_retries,
+            retry_base_delay=bili.retry_base_delay,
+            user_agent=bili.user_agent[:50] + "..." if len(bili.user_agent) > 50 else bili.user_agent,
+            api_mode=bili.api_mode,
+        )
+    except Exception as e:
+        logger.error(f"Failed to get bilibili config: {e}")
+        raise HTTPException(status_code=500, detail={"error": "InternalError", "message": str(e)})
+
+
+@router.put("/config/bilibili")
+async def update_bilibili_config(request: BilibiliConfigUpdateRequest):
+    """
+    PUT /v1/config/bilibili
+
+    更新B站下载配置（会写入 config.yaml）
+    参考BBDown: https://github.com/nilaoda/BBDown
+
+    支持的更新字段：
+    - cookie: B站登录Cookie (SESSDATA等)
+    - access_token: TV/App接口Token
+    - min_interval/max_interval: 请求间隔范围(秒)
+    - delay_per_page: 页面间延迟(秒)
+    - max_retries: 最大重试次数
+    - retry_base_delay: 指数退避基数(秒)
+    - user_agent: User-Agent字符串
+    - api_mode: API模式 (web/tv/app/intl)
+    """
+    try:
+        from persona_engine.core.config import config
+
+        # 获取当前配置
+        bili = config.bilibili
+        current_config = {
+            "cookie": bili.cookie,
+            "access_token": bili.access_token,
+            "min_interval": bili.min_interval,
+            "max_interval": bili.max_interval,
+            "delay_per_page": bili.delay_per_page,
+            "max_retries": bili.max_retries,
+            "retry_base_delay": bili.retry_base_delay,
+            "user_agent": bili.user_agent,
+            "api_mode": bili.api_mode,
+        }
+
+        # 合并更新（只更新非None的字段）
+        updates = request.model_dump(exclude_unset=True)
+        current_config.update(updates)
+
+        # 写入配置文件
+        config_path = Path(__file__).parent.parent.parent / "config.yaml"
+        if config_path.exists():
+            import yaml
+            with open(config_path, "r", encoding="utf-8") as f:
+                yaml_config = yaml.safe_load(f) or {}
+        else:
+            yaml_config = {}
+
+        # 更新bilibili配置
+        yaml_config["bilibili"] = current_config
+
+        with open(config_path, "w", encoding="utf-8") as f:
+            yaml.dump(yaml_config, f, allow_unicode=True, default_flow_style=False)
+
+        # 重新加载配置
+        config.reload()
+
+        return {
+            "message": "配置已更新",
+            "config": BilibiliConfigResponse(
+                cookie="***" if current_config["cookie"] else "",
+                access_token="***" if current_config["access_token"] else "",
+                min_interval=current_config["min_interval"],
+                max_interval=current_config["max_interval"],
+                delay_per_page=current_config["delay_per_page"],
+                max_retries=current_config["max_retries"],
+                retry_base_delay=current_config["retry_base_delay"],
+                user_agent=current_config["user_agent"],
+                api_mode=current_config["api_mode"],
+            ),
+        }
+    except Exception as e:
+        logger.error(f"Failed to update bilibili config: {e}")
+        raise HTTPException(status_code=500, detail={"error": "InternalError", "message": str(e)})

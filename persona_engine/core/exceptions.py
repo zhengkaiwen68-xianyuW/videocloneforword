@@ -77,14 +77,26 @@ class PersonalityExtractionError(ASRError):
 
 
 class BilibiliDownloadError(ASRError):
-    """B站视频下载失败"""
+    """
+    B站视频下载失败
 
-    def __init__(self, message: str, url: str | None = None, details: dict | None = None):
+    Attributes:
+        retryable: 是否可以重试（412/429/403等错误时可重试）
+    """
+
+    def __init__(
+        self,
+        message: str,
+        url: str | None = None,
+        details: dict | None = None,
+        retryable: bool = False,
+    ):
         super().__init__(
             message=message,
             code="BILIBILI_DOWNLOAD_ERROR",
             details={**(details or {}), "url": url},
         )
+        self.retryable = retryable
 
 
 class AudioExtractionError(ASRError):

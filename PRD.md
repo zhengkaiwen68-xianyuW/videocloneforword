@@ -15,6 +15,8 @@
 | 2026-04-11 | 任务进度更新不及时（每3个视频才更新） | 已修复 | 改为每完成1个视频即更新 |
 | 2026-04-11 | 服务器重启后任务无法断点续传 | 已修复 | 实现任务持久化，添加中断任务查询 |
 | 2026-04-11 | 无法主动取消/删除正在处理的任务 | 已修复 | 添加 DELETE /v1/tasks/{id} 接口 |
+| 2026-04-12 | B站下载触发412反爬限制 | 已修复 | 添加Cookie认证、指数退避重试、可配置请求间隔 |
+| 2026-04-12 | 无法从B站UP主空间链接创建人格 | 已修复 | 支持 space.bilibili.com/UID，自动获取30个视频 |
 
 ### 1.2 待确认问题
 
@@ -76,6 +78,80 @@
 | 任务列表（显示所有视频处理任务） | P1 |
 | 取消/删除任务按钮 | P1 |
 | 操作日志面板 | P2 |
+
+### 2.3 B站UP主空间人格创建
+
+**目标：** 支持从B站UP主个人空间链接自动创建人格
+
+| 功能 | 优先级 | 描述 |
+|------|--------|------|
+| 空间链接解析 | P0 | 支持 https://space.bilibili.com/UID 格式 |
+| 自动获取30个视频 | P0 | 获取该UP主最新发布的30个视频 |
+| 进度追踪 | P0 | 详细显示每个视频的处理进度 |
+
+**技术方案：**
+
+1. **新增 `BilibiliSpaceDownloader` 类**
+   - 使用 yt-dlp 的 `BilibiliSpaceVideoIE` 提取器
+   - 获取UP主空间视频列表（不下载，只获取元信息）
+   - 支持按发布时间排序
+
+2. **扩展 `PersonaCreateRequest`**
+   ```python
+   @dataclass
+   class PersonaCreateRequest:
+       name: str
+       source_texts: list[str] = None
+       video_urls: list[str] = None
+       space_url: str = None  # 新增
+   ```
+
+3. **增强进度追踪**
+   ```json
+   {
+     "status": "processing",
+     "total_videos": 30,
+     "completed_videos": 5,
+     "failed_videos": 1,
+     "current_video": {
+       "index": 6,
+       "phase": "downloading",
+       "progress": 45.2,
+       "bv_id": "BVxxx"
+     }
+   }
+   ```
+
+### 2.4 B站反爬优化配置
+
+**目标：** 通过配置提升B站下载成功率
+
+| 功能 | 优先级 | 描述 |
+|------|--------|------|
+| Cookie认证 | P0 | 配置B站登录Cookie，提高请求稳定性 |
+| 指数退避重试 | P0 | 失败后等待时间指数增长，避免频繁触发412 |
+| 可配置请求间隔 | P0 | 从配置读取请求间隔范围 |
+| 前端设置界面 | P0 | Web UI提供设置面板，无需手动修改配置文件 |
+
+**参考项目：** [BBDown](https://github.com/nilaoda/BBDown) - 成熟的B站下载器
+
+**配置项：**
+```yaml
+bilibili:
+  cookie: ""           # B站登录Cookie
+  access_token: ""     # TV/App接口Token
+  min_interval: 3.0    # 请求间隔最小值(秒)
+  max_interval: 10.0   # 请求间隔最大值(秒)
+  delay_per_page: 5.0  # 页面间延迟(秒)
+  max_retries: 5       # 最大重试次数
+  retry_base_delay: 2.0 # 指数退避基数(秒)
+  user_agent: "..."   # User-Agent
+  api_mode: "web"      # web/tv/app/intl
+```
+
+**API端点：**
+- `GET /v1/config/bilibili` - 获取B站配置
+- `PUT /v1/config/bilibili` - 更新B站配置
 
 ---
 
@@ -232,20 +308,29 @@
 ## 七、待办清单
 
 ### P0 (必须)
-- [ ] 设计 VideoProcessingTask 数据模型
-- [ ] 实现任务持久化（每完成1个视频即保存）
-- [ ] 实现任务断点续传
-- [ ] 实现任务取消功能
+- [x] 设计 VideoProcessingTask 数据模型
+- [x] 实现任务持久化（每完成1个视频即保存）
+- [x] 实现任务断点续传
+- [x] 实现任务取消功能
+- [x] B站UP主空间链接创建人格
+- [x] B站反爬优化配置（Cookie/指数退避）
 
 ### P1 (应该)
 - [ ] 新增 GET /v1/video-tasks 端点
 - [ ] 新增 DELETE /v1/video-tasks/{id} 端点
 - [ ] 新增 POST /v1/video-tasks/{id}/resume 端点
 - [ ] Web UI 任务监控面板
+- [ ] Cookie自动刷新机制
 
 ### P2 (可以)
 - [ ] 操作日志面板
 - [ ] 失败视频重试功能
+- [ ] 代理IP支持
+- [ ] 多API模式切换（TV/App）
+
+---
+
+*最后更新：2026-04-12*
 - [ ] 任务超时可配置
 
 ---

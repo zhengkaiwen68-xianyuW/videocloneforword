@@ -229,6 +229,7 @@ class PersonaCreateRequest:
     name: str                         # 作者名称
     source_texts: list[str] = None    # ASR 原文（可选，与 video_urls 二选一）
     video_urls: list[str] = None      # B站视频链接列表（可选，与 source_texts 二选一）
+    space_url: str = None             # B站UP主空间链接（可选）
 
 
 @dataclass

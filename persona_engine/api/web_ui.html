@@ -48,7 +48,10 @@
 
         /* Middle Column - Processing */
         .middle-col { flex: 1; padding: 20px; display: flex; flex-direction: column; }
-        .middle-col h1 { font-size: 20px; margin-bottom: 15px; color: #e94560; }
+        .middle-col h1 { font-size: 20px; margin-bottom: 15px; color: #e94560; display: flex; justify-content: space-between; align-items: center; }
+        .header-actions { display: flex; gap: 10px; }
+        .settings-btn { padding: 8px 15px; background: #0f3460; border: none; border-radius: 6px; color: #eee; cursor: pointer; font-size: 13px; }
+        .settings-btn:hover { background: #1a4a80; }
         .bili-section { background: #16213e; border: 1px solid #0f3460; border-radius: 8px; padding: 12px; margin-bottom: 15px; }
         .bili-section h3 { font-size: 13px; color: #4ecca3; margin-bottom: 8px; }
         .bili-input-row { display: flex; gap: 8px; }
@@ -124,7 +127,12 @@
 
         <!-- Middle Column - Processing -->
         <div class="middle-col">
-            <h1>短视频人格深度重构引擎</h1>
+            <h1>
+                <span>短视频人格深度重构引擎</span>
+                <div class="header-actions">
+                    <button class="settings-btn" onclick="openSettingsModal()">⚙️ 设置</button>
+                </div>
+            </h1>
 
             <!-- B站视频下载区 -->
             <div class="bili-section">
@@ -182,6 +190,59 @@
 
     <!-- Toast -->
     <div class="toast" id="toast">操作成功</div>
+
+    <!-- Settings Modal -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content" style="width: 500px;">
+            <h2>⚙️ B站下载设置</h2>
+            <p style="font-size: 12px; color: #888; margin-bottom: 15px;">
+                参考项目: <a href="https://github.com/nilaoda/BBDown" target="_blank" style="color: #4ecca3;">BBDown</a>
+                - 配置Cookie可大幅提升下载成功率
+            </p>
+
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 12px; color: #888;">Cookie (登录B站后从开发者工具复制)</label>
+                <input type="password" id="settingCookie" placeholder="SESSDATA=xxx; bili_jct=xxx; ..." style="height: 40px;">
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 12px; color: #888;">Access Token (TV/App接口)</label>
+                <input type="password" id="settingAccessToken" placeholder="TV/App接口的access_token">
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                <div style="flex: 1;">
+                    <label style="font-size: 12px; color: #888;">请求间隔最小值(秒)</label>
+                    <input type="number" id="settingMinInterval" placeholder="3.0" step="0.1" min="1" max="30">
+                </div>
+                <div style="flex: 1;">
+                    <label style="font-size: 12px; color: #888;">请求间隔最大值(秒)</label>
+                    <input type="number" id="settingMaxInterval" placeholder="10.0" step="0.1" min="1" max="60">
+                </div>
+            </div>
+
+            <div style="display: flex; gap: 10px; margin-bottom: 10px;">
+                <div style="flex: 1;">
+                    <label style="font-size: 12px; color: #888;">最大重试次数</label>
+                    <input type="number" id="settingMaxRetries" placeholder="5" min="1" max="20">
+                </div>
+                <div style="flex: 1;">
+                    <label style="font-size: 12px; color: #888;">指数退避基数(秒)</label>
+                    <input type="number" id="settingRetryBaseDelay" placeholder="2.0" step="0.1" min="1" max="10">
+                </div>
+            </div>
+
+            <div style="margin-bottom: 10px;">
+                <label style="font-size: 12px; color: #888;">User-Agent</label>
+                <input type="text" id="settingUserAgent" placeholder="Mozilla/5.0..." style="height: 40px;">
+            </div>
+
+            <div class="btn-group">
+                <button class="cancel-btn" onclick="closeSettingsModal()">取消</button>
+                <button class="confirm-btn" onclick="saveSettings()">保存配置</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         let authors = [];
@@ -471,6 +532,77 @@
             toast.textContent = msg;
             toast.style.display = 'block';
             setTimeout(() => toast.style.display = 'none', 3000);
+        }
+
+        // ========== Settings Modal ==========
+        let currentSettings = {};
+
+        async function openSettingsModal() {
+            document.getElementById('settingsModal').classList.add('active');
+            await loadSettings();
+        }
+
+        function closeSettingsModal() {
+            document.getElementById('settingsModal').classList.remove('active');
+        }
+
+        async function loadSettings() {
+            try {
+                const resp = await fetch('/v1/config/bilibili');
+                const data = await resp.json();
+
+                currentSettings = data;
+
+                document.getElementById('settingCookie').value = '';
+                document.getElementById('settingAccessToken').value = '';
+                document.getElementById('settingMinInterval').value = data.min_interval || 3.0;
+                document.getElementById('settingMaxInterval').value = data.max_interval || 10.0;
+                document.getElementById('settingMaxRetries').value = data.max_retries || 5;
+                document.getElementById('settingRetryBaseDelay').value = data.retry_base_delay || 2.0;
+                document.getElementById('settingUserAgent').value = data.user_agent || '';
+            } catch (e) {
+                console.error('Failed to load settings:', e);
+                showToast('加载设置失败');
+            }
+        }
+
+        async function saveSettings() {
+            try {
+                const updates = {};
+
+                const cookie = document.getElementById('settingCookie').value.trim();
+                const accessToken = document.getElementById('settingAccessToken').value.trim();
+                const minInterval = parseFloat(document.getElementById('settingMinInterval').value);
+                const maxInterval = parseFloat(document.getElementById('settingMaxInterval').value);
+                const maxRetries = parseInt(document.getElementById('settingMaxRetries').value);
+                const retryBaseDelay = parseFloat(document.getElementById('settingRetryBaseDelay').value);
+                const userAgent = document.getElementById('settingUserAgent').value.trim();
+
+                // 只添加有值的字段
+                if (cookie) updates.cookie = cookie;
+                if (accessToken) updates.access_token = accessToken;
+                if (!isNaN(minInterval)) updates.min_interval = minInterval;
+                if (!isNaN(maxInterval)) updates.max_interval = maxInterval;
+                if (!isNaN(maxRetries)) updates.max_retries = maxRetries;
+                if (!isNaN(retryBaseDelay)) updates.retry_base_delay = retryBaseDelay;
+                if (userAgent) updates.user_agent = userAgent;
+
+                const resp = await fetch('/v1/config/bilibili', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(updates)
+                });
+
+                if (resp.ok) {
+                    showToast('设置已保存');
+                    closeSettingsModal();
+                } else {
+                    showToast('保存设置失败');
+                }
+            } catch (e) {
+                console.error('Failed to save settings:', e);
+                showToast('保存设置失败: ' + e.message);
+            }
         }
 
         // ========== Task Monitor ==========

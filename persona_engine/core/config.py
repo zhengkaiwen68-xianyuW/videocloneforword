@@ -65,6 +65,43 @@ class AppConfig:
     watch_folder: str = "watch"
 
 
+@dataclass
+class BilibiliConfig:
+    """
+    B站下载配置
+
+    参考BBDown设计: https://github.com/nilaoda/BBDown
+    B站反爬机制:
+    - 412: 请求被阻止，需要等待后重试
+    - 429: 请求过于频繁
+    - 403: 禁止访问，可能需要登录/Cookie
+
+    优化策略:
+    1. Cookie认证 - 提高请求稳定性
+    2. 请求间隔可配置 - 避免高频触发限流
+    3. 指数退避重试 - 失败后自动等待并重试
+    4. 多API模式 - Web/TV/App/国际版切换
+    """
+    # 认证配置
+    cookie: str = ""              # 网页Cookie (SESSDATA等)
+    access_token: str = ""        # TV/App接口Token
+
+    # 请求控制
+    min_interval: float = 3.0     # 请求间隔最小值(秒)
+    max_interval: float = 10.0    # 请求间隔最大值(秒)
+    delay_per_page: float = 5.0   # 页面间延迟(秒)
+
+    # 重试配置
+    max_retries: int = 5          # 最大重试次数
+    retry_base_delay: float = 2.0  # 指数退避基数(秒)
+
+    # User-Agent
+    user_agent: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    # API模式: web/tv/app/intl
+    api_mode: str = "web"
+
+
 class Config:
     """配置管理器"""
 
@@ -148,6 +185,26 @@ class Config:
             grammar_weight=cfg.get("grammar_weight", 0.20),
             term_preservation_weight=cfg.get("term_preservation_weight", 0.30),
             rhythm_weight=cfg.get("rhythm_weight", 0.25),
+        )
+
+    @property
+    def bilibili(self) -> BilibiliConfig:
+        """
+        B站下载配置
+
+        参考BBDown设计: https://github.com/nilaoda/BBDown
+        """
+        cfg = self._config.get("bilibili", {})
+        return BilibiliConfig(
+            cookie=cfg.get("cookie", ""),
+            access_token=cfg.get("access_token", ""),
+            min_interval=cfg.get("min_interval", 3.0),
+            max_interval=cfg.get("max_interval", 10.0),
+            delay_per_page=cfg.get("delay_per_page", 5.0),
+            max_retries=cfg.get("max_retries", 5),
+            retry_base_delay=cfg.get("retry_base_delay", 2.0),
+            user_agent=cfg.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            api_mode=cfg.get("api_mode", "web"),
         )
 
     @property

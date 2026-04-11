@@ -1,0 +1,33 @@
+app:
+  debug: false
+  host: 127.0.0.1
+  port: 8080
+audit:
+  grammar_weight: 0.2
+  max_iterations: 5
+  min_consistency_score: 90.0
+  rhythm_weight: 0.42
+  term_preservation_weight: 0.3
+  timeout_seconds: 300
+  verbal_tic_weight: 0.08
+bilibili:
+  access_token: ''
+  api_mode: web
+  cookie: my_real_cookie_value_here
+  delay_per_page: 5.0
+  max_interval: 10.0
+  max_retries: 15
+  min_interval: 8.0
+  retry_base_delay: 2.0
+  user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
+    like Gecko) Chrome/120.0.0.0 Safari/537.36
+database:
+  path: persona_engine.db
+minimax:
+  api_key: ''
+whisper:
+  compute_type: int8
+  device: cpu
+  language: zh
+  model_size: base
+  vad_filter: true
