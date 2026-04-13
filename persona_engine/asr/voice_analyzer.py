@@ -102,8 +102,12 @@ class VoiceAnalyzer:
                 segment_wpm = (len(segment_words) / segment_duration * 60) if segment_duration > 0 else 0
 
                 # 计算该段的停顿密度
+                # 用时间戳比较而非词索引计数，复杂度从 O(n²) 降至 O(n)，
+                # 同时修正语速不均匀时停顿归属错判的逻辑 Bug
+                seg_start_time = segment_words[0].start
+                seg_end_time = segment_words[-1].end
                 segment_pauses = [p for p in asr_result.pauses
-                                 if start_idx <= sum(1 for w in words if w.end <= p.start) < end_idx]
+                                 if seg_start_time <= p.start < seg_end_time]
                 pause_density = len(segment_pauses) / segment_size if segment_size > 0 else 0
 
                 # 兴奋度 = 归一化语速 * 0.7 + 反归一化停顿密度 * 0.3

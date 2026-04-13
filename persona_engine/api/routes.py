@@ -37,6 +37,7 @@ from persona_engine.core.types import (
 from persona_engine.core.task_registry import task_registry
 from persona_engine.storage.persona_repo import PersonaRepository, TaskRepository, VideoTaskRepository
 from persona_engine.asr.personality_extractor import PersonalityExtractor
+from persona_engine.asr.transcriber import WhisperTranscriber
 from persona_engine.asr.bilibili_downloader import (
     BilibiliSpaceDownloader,
     is_valid_bilibili_space_url,
@@ -55,6 +56,9 @@ persona_repo = PersonaRepository()
 task_repo = TaskRepository()
 video_task_repo = VideoTaskRepository()
 
+# 共享 WhisperTranscriber 单例（实例本身轻量；模型常驻 WhisperWorker 子进程，懒加载）
+_transcriber = WhisperTranscriber()
+
 
 # ========== 请求/响应模型 ==========
 
@@ -66,6 +70,7 @@ class PersonaResponse(BaseModel):
     grammar_prefs: list[str]
     logic_architecture: dict
     temporal_patterns: dict
+    deep_psychology: dict
     raw_json: dict
     created_at: str
     updated_at: str
@@ -176,6 +181,12 @@ async def get_personas():
                         "pause_frequency": p.temporal_patterns.pause_frequency,
                         "speech_rhythm": p.temporal_patterns.speech_rhythm,
                         "excitement_curve": p.temporal_patterns.excitement_curve,
+                    },
+                    deep_psychology={
+                        "emotional_tone": p.deep_psychology.emotional_tone,
+                        "emotional_arc": p.deep_psychology.emotional_arc,
+                        "rhetorical_devices": p.deep_psychology.rhetorical_devices,
+                        "lexicon": p.deep_psychology.lexicon,
                     },
                     raw_json=p.raw_json,
                     created_at=p.created_at.isoformat(),
@@ -401,6 +412,12 @@ async def get_persona(persona_id: str):
                 "speech_rhythm": persona.temporal_patterns.speech_rhythm,
                 "excitement_curve": persona.temporal_patterns.excitement_curve,
             },
+            deep_psychology={
+                "emotional_tone": persona.deep_psychology.emotional_tone,
+                "emotional_arc": persona.deep_psychology.emotional_arc,
+                "rhetorical_devices": persona.deep_psychology.rhetorical_devices,
+                "lexicon": persona.deep_psychology.lexicon,
+            },
             raw_json=persona.raw_json,
             created_at=persona.created_at.isoformat(),
             updated_at=persona.updated_at.isoformat(),
@@ -459,6 +476,12 @@ async def update_persona(persona_id: str, request: PersonaUpdateRequest):
                 "pause_frequency": persona.temporal_patterns.pause_frequency,
                 "speech_rhythm": persona.temporal_patterns.speech_rhythm,
                 "excitement_curve": persona.temporal_patterns.excitement_curve,
+            },
+            deep_psychology={
+                "emotional_tone": persona.deep_psychology.emotional_tone,
+                "emotional_arc": persona.deep_psychology.emotional_arc,
+                "rhetorical_devices": persona.deep_psychology.rhetorical_devices,
+                "lexicon": persona.deep_psychology.lexicon,
             },
             raw_json=persona.raw_json,
             created_at=persona.created_at.isoformat(),
@@ -717,7 +740,7 @@ async def cancel_task(task_id: str):
             cancelled = task_registry.cancel(task_id)
 
         # 更新 personas 表的 raw_json.status 为 cancelled
-        # 这会被 run_persona_from_videos_task 中的 _is_task_cancelled() 检查点读取
+        # 这会被 run_persona_from_videos_task 中的 task_registry.is_cancelled() 检查点读取
         persona_id = task_id if not task_id.startswith("persona_") else task_id[len("persona_"):]
         try:
             existing = await persona_repo.get_by_id(persona_id)
@@ -1001,12 +1024,10 @@ async def run_bilibili_asr_task(task_id: str, urls: list[str], name: str | None)
         BilibiliDownloader,
         VIDEO_SPLIT_MARKER,
     )
-    from persona_engine.asr.transcriber import WhisperTranscriber
     from persona_engine.storage.persona_repo import TaskRepository
 
     task_repo = TaskRepository()
     downloader = BilibiliDownloader()
-    transcriber = WhisperTranscriber()
     audio_paths = []
 
     all_results = []  # 存储所有视频的ASR结果
@@ -1079,8 +1100,13 @@ async def run_bilibili_asr_task(task_id: str, urls: list[str], name: str | None)
                     status="running",
                 )
 
-                # 执行ASR转写
-                asr_result = transcriber.transcribe(audio_path)
+                # 执行ASR转写（WhisperWorker 常驻进程池，支持取消）
+                asr_result = await _transcriber.transcribe_async(audio_path, task_id)
+
+                # 返回 None 说明转写被取消
+                if asr_result is None:
+                    logger.info(f"Task {task_id} [{i+1}/{total}]: 转写被取消，停止处理")
+                    break
 
                 # 保存单个视频结果（带视频索引标识）
                 video_result = {
@@ -1168,7 +1194,6 @@ async def run_bilibili_asr_task(task_id: str, urls: list[str], name: str | None)
                 downloader.cleanup(audio_path)
             except Exception:
                 pass
-        transcriber.release()
 
 
 async def _run_persona_from_videos_task_with_tracking(
@@ -1286,10 +1311,8 @@ async def run_persona_from_videos_task(
         BilibiliDownloader,
         VIDEO_SPLIT_MARKER,
     )
-    from persona_engine.asr.transcriber import WhisperTranscriber
 
     downloader = BilibiliDownloader()
-    transcriber = WhisperTranscriber()
     audio_paths = []
     all_results = []
     completed = 0
@@ -1327,120 +1350,6 @@ async def run_persona_from_videos_task(
             ))
         return progress_callback
 
-    async def _is_task_cancelled(persona_id: str) -> bool:
-        """检查任务是否已被取消
-
-        优先使用内存中的取消标志（task_registry.is_cancelled），避免频繁 DB 查询。
-        只有在内存标志不存在时才回退到 DB 查询。
-        """
-        task_id = f"persona_{persona_id}"
-        # 优先检查内存标志
-        if task_registry.is_cancelled(task_id):
-            return True
-        # 回退到 DB 查询（用于其他途径触发的取消，如直接数据库修改）
-        try:
-            persona = await persona_repo.get_by_id(persona_id)
-            if persona and persona.raw_json:
-                import json as _json
-                raw = persona.raw_json if isinstance(persona.raw_json, dict) else _json.loads(persona.raw_json)
-                return raw.get("status") == "cancelled"
-        except Exception:
-            pass
-        return False
-
-    async def extract_asr_with_checkpoint(persona_id: str, audio_path: str) -> str | None:
-        """执行 Whisper 转写，通过并行协程监控取消状态并强制释放算力"""
-        from persona_engine.core.config import config as engine_config
-
-        whisper_config = engine_config.whisper
-        cmd = [
-            "whisper", audio_path,
-            "--model", whisper_config.model_size,
-            "--language", whisper_config.language or "zh",
-            "--device", whisper_config.device or "cpu",
-        ]
-
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except Exception as e:
-            logger.error(f"启动 Whisper 进程失败: {e}")
-            # 降级到同步转写
-            asr_result = transcriber.transcribe(audio_path)
-            return asr_result.text if asr_result else ""
-
-        cancel_flag = False
-
-        async def watch_cancel():
-            nonlocal cancel_flag
-            while process.returncode is None:
-                await asyncio.sleep(2)  # 每 2 秒检查一次状态
-                if await _is_task_cancelled(persona_id):
-                    logger.info(f"[Task persona_{persona_id}] 任务被取消！强杀 Whisper (PID: {process.pid})")
-                    cancel_flag = True
-                    try:
-                        process.terminate()
-                    except ProcessLookupError:
-                        # 进程已结束
-                        pass
-                    except OSError as e:
-                        logger.warning(f"Failed to terminate Whisper process: {e}")
-                    break
-
-        # 确保进程被正确终止的辅助函数
-        async def ensure_process_terminated():
-            """等待进程终止，必要时强制 kill"""
-            try:
-                # 先尝试正常终止
-                await asyncio.wait_for(process.wait(), timeout=2.0)
-            except asyncio.TimeoutError:
-                # 超时后强制 kill
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    # 进程已结束
-                    pass
-                except OSError as e:
-                    logger.warning(f"Failed to kill Whisper process: {e}")
-
-        # 启动监控任务
-        watcher = asyncio.create_task(watch_cancel())
-
-        # 等待进程执行完毕（或被 kill）
-        try:
-            stdout, stderr = await process.communicate()
-        except Exception as e:
-            logger.error(f"Whisper 进程通信错误: {e}")
-            watcher.cancel()
-            try:
-                await watcher  # 等待 watcher 真正结束
-            except asyncio.CancelledError:
-                pass
-            # 确保进程被终止
-            await ensure_process_terminated()
-            return None
-
-        watcher.cancel()
-        try:
-            await watcher  # 等待 watcher 真正结束
-        except asyncio.CancelledError:
-            pass
-
-        if cancel_flag:
-            # 任务被取消，确保进程被终止
-            await ensure_process_terminated()
-            return None
-
-        if process.returncode != 0:
-            logger.error(f"Whisper 进程异常退出 (code={process.returncode}): {stderr.decode()}")
-            return None
-
-        return stdout.decode('utf-8').strip()
-
     try:
         total = len(video_urls)
         logger.info(f"Task {task_id}: Starting persona creation from {total} videos")
@@ -1452,8 +1361,8 @@ async def run_persona_from_videos_task(
         for i, url in enumerate(video_urls):
             bv_id = extract_bv_from_url(url)
 
-            # 【检查点 1】：下载前状态检查
-            if await _is_task_cancelled(persona_id):
+            # 【检查点 1】：下载前状态检查（同步读取内存标志，无 DB 查询）
+            if task_registry.is_cancelled(task_id):
                 logger.info(f"[Task {task_id}] 检测到取消信号，停止下载 {url}")
                 break
 
@@ -1502,8 +1411,8 @@ async def run_persona_from_videos_task(
                 )
                 audio_paths.append(audio_path)
 
-                # 【检查点 2】：转写前状态检查与垃圾清理
-                if await _is_task_cancelled(persona_id):
+                # 【检查点 2】：转写前状态检查与垃圾清理（同步读取内存标志）
+                if task_registry.is_cancelled(task_id):
                     logger.info(f"[Task {task_id}] 检测到取消信号，放弃转写并清理: {audio_path}")
                     if os.path.exists(audio_path):
                         os.remove(audio_path)
@@ -1522,12 +1431,13 @@ async def run_persona_from_videos_task(
                     failed=failed,
                 )
 
-                # 【步骤 2】：动态超时转写（Whisper）
+                # 【步骤 2】：动态超时转写（WhisperWorker 常驻进程池，支持取消信号）
                 logger.info(f"Task {task_id} [{i+1}/{total}]: 开始转写 (动态超时: {asr_timeout:.0f}秒)")
-                asr_text = await asyncio.wait_for(
-                    extract_asr_with_checkpoint(persona_id, audio_path),
+                _asr = await asyncio.wait_for(
+                    _transcriber.transcribe_async(audio_path, task_id),
                     timeout=asr_timeout,
                 )
+                asr_text = _asr.text if _asr else None
 
                 # 返回 None 说明转写被中途中断（用户取消）
                 if asr_text is None:
@@ -1694,7 +1604,6 @@ async def run_persona_from_videos_task(
                 downloader.cleanup(audio_path)
             except Exception:
                 pass
-        transcriber.release()
 
 
 async def _run_persona_upgrade_task_with_tracking(
@@ -1745,10 +1654,8 @@ async def run_persona_upgrade_task(
         BilibiliDownloader,
         VIDEO_SPLIT_MARKER,
     )
-    from persona_engine.asr.transcriber import WhisperTranscriber
 
     downloader = BilibiliDownloader()
-    transcriber = WhisperTranscriber()
     audio_paths = []
     all_results = []
     completed = 0
@@ -1776,8 +1683,12 @@ async def run_persona_upgrade_task(
                 audio_path = await downloader.download_and_extract_audio(url)
                 audio_paths.append(audio_path)
 
-                # 执行ASR转写
-                asr_result = transcriber.transcribe(audio_path)
+                # 执行ASR转写（WhisperWorker 常驻进程池，支持取消）
+                asr_result = await _transcriber.transcribe_async(audio_path, task_id)
+
+                if asr_result is None:
+                    logger.info(f"Task {task_id} [{i+1}/{total}]: 转写被取消，停止处理")
+                    break
 
                 all_results.append({
                     "index": i,
@@ -1851,7 +1762,6 @@ async def run_persona_upgrade_task(
                 downloader.cleanup(audio_path)
             except Exception:
                 pass
-        transcriber.release()
 
 
 @router.get("/asr/tasks/{task_id}/status")

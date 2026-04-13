@@ -265,3 +265,67 @@ class WhisperTranscriber:
         if self._model is not None:
             del self._model
             self._model = None
+
+    async def transcribe_async(
+        self,
+        audio_path: str,
+        task_id: str,
+    ) -> ASRResult | None:
+        """
+        异步转写（使用 WhisperWorker 进程池）。
+
+        模型常驻子进程，避免重复加载；支持通过 task_registry 取消并物理释放 VRAM。
+
+        Args:
+            audio_path: 音频文件路径
+            task_id: 任务 ID（与 task_registry 中注册的 key 一致）
+
+        Returns:
+            ASRResult，任务被取消时返回 None
+
+        Raises:
+            AudioFileNotFoundError: 文件不存在
+            UnsupportedAudioFormatError: 不支持的格式
+            TranscriptionError: 推理失败
+        """
+        self._validate_file(audio_path)
+
+        from .whisper_worker import whisper_worker
+
+        try:
+            result_dict = await whisper_worker.transcribe(audio_path, task_id)
+        except Exception as e:
+            raise TranscriptionError(
+                message=f"Transcription failed: {str(e)}",
+                file_path=audio_path,
+                details={"error_type": type(e).__name__},
+            )
+
+        if result_dict is None:
+            # 任务被取消
+            return None
+
+        words: list[WordTimestamp] = [
+            WordTimestamp(
+                word=w["word"],
+                start=w["start"],
+                end=w["end"],
+            )
+            for w in result_dict["words"]
+        ]
+
+        speech_duration = result_dict["speech_duration"]
+        word_count = len(words)
+        wpm = (word_count / speech_duration * 60) if speech_duration > 0 else 0.0
+        pauses = self._analyze_pauses(words)
+
+        return ASRResult(
+            file_path=audio_path,
+            text=result_dict["text"],
+            words=words,
+            wpm=wpm,
+            pauses=pauses,
+            total_duration=result_dict["duration"],
+            speech_duration=speech_duration,
+            language=result_dict["language"],
+        )

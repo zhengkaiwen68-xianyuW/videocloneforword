@@ -52,3 +52,9 @@
 | #003 | 重写版本数据丢失 | Model 与 Profile 转换逻辑未覆盖 `deep_psychology` | 执行"数据完整性"交叉检查 |
 | #004 | 任务进度更新 TypeError，导致视频处理崩溃 | 业务函数参数定义与 Repository 不匹配（`failed_urls` 遗漏） | 强制检查函数签名的一致性 |
 | #005 | 内存注册表注销错误，batch 任务 callback 指向错误 task_id | 循环中 lambda 捕获了错误的 `task_id`（闭包变量延迟绑定） | 循环内回调必须使用默认参数绑定 |
+| #006 | `server.py --reload` 模式启动必崩，NameError: `os` is not defined | `os.system()` 被调用但文件头未 `import os` | 每次新增系统调用后必须检查对应 import |
+| #007 | Whisper 推理期间整个 API 服务无响应（所有请求超时） | `transcriber.transcribe()` 是同步阻塞调用，直接在 async 协程中调用会阻塞整个事件循环 | 所有同步 IO/CPU 密集调用必须包裹在 `asyncio.to_thread()` 中 |
+| #008 | `GET /v1/personas` 等接口返回的人格数据中 `deep_psychology` 字段丢失 | `PersonaResponse` Pydantic 模型定义中漏加 `deep_psychology` 字段，导致 FastAPI 序列化时直接忽略该字段 | 修改数据类后必须同步更新对应的 API Response Model，执行"全链路字段对齐"检查 |
+| #009 | 任务取消或超时后 Whisper 仍占用 VRAM，下次转写 OOM | `asyncio.to_thread` + CLI subprocess 两条路径均无法物理终止 CUDA 进程，显存不释放 | 所有 Whisper 推理必须通过 `WhisperWorker` 进程池单例，取消时调用 `_restart_executor()` 物理回收 |
+| #010 | 30 个视频任务重复加载 Whisper large-v3，每视频额外耗时 5-10 秒，VRAM 反复分配 | 每次 `WhisperTranscriber()` 实例化或启动 CLI subprocess 都会从磁盘重新加载模型 | 使用 `WhisperWorker` ProcessPoolExecutor 单例：模型常驻子进程，仅取消/故障时重建 |
+| #011 | `excitement_curve` 停顿归属计算错误（语速不均匀时某段停顿会被算入错误片段） | `sum(1 for w in words if w.end <= p.start)` 用词数量索引代替时间戳比较，O(n²) 且逻辑错误 | 改用 `seg_start_time <= p.start < seg_end_time` 时间戳区间比较，O(n) 且语义正确 |
