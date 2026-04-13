@@ -10,11 +10,13 @@ Bilibili 视频下载模块
 from __future__ import annotations
 
 import asyncio
+import atexit
 import logging
 import random
 import re
 import shutil
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -24,8 +26,15 @@ from typing import NamedTuple
 from yt_dlp import YoutubeDL
 
 from ..core.exceptions import BilibiliDownloadError, AudioExtractionError
+from ..core.asyncio_patch import get_global_loop, apply_patch
+
+# 应用 asyncio patch（只执行一次，重复调用安全）
+apply_patch()
 
 logger = logging.getLogger(__name__)
+
+# 获取全局事件循环（供模块内部使用）
+_asyncio_loop = get_global_loop()
 
 # 视频分割标记（用于分隔多个视频的ASR结果）
 VIDEO_SPLIT_MARKER = "|||BILI_ASR_SPLIT|||"
@@ -300,10 +309,9 @@ class BilibiliDownloader:
             if progress_callback:
                 progress_callback(0, "开始下载...")
 
-            # 在线程池中执行下载
-            loop = asyncio.get_event_loop()
-            video_info = await loop.run_in_executor(
-                None, self._download_with_retry, url, ydl_opts, output_dir
+            # 直接在当前事件循环中运行下载（不用 executor 避免线程中找不到 loop）
+            video_info = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: self._download_with_retry(url, ydl_opts, output_dir)
             )
 
             if progress_callback:
@@ -379,50 +387,86 @@ class BilibiliDownloader:
 
         Returns:
             视频信息字典
+
+        Note:
+            yt-dlp 内部使用 asyncio.get_running_loop()，该函数在 Python 3.12 中是
+            C 实现无法 patch。使用 subprocess 隔离运行以避免 event loop 错误。
         """
-        # yt-dlp 内部使用 asyncio.get_running_loop() 处理 cookie 等操作。
-        # 我们通过 run_in_executor 调用此函数，线程来自 asyncio 的默认线程池。
-        # 在该线程中创建一个后台线程运行事件循环，使 yt-dlp 能找到 running loop。
-        import threading
+        import subprocess
+        import sys
+        import json
+        import tempfile
 
-        loop = None
-        loop_thread = None
+        # 将 ydl_opts 序列化（去掉不可序列化的部分）
+        clean_opts = {k: v for k, v in ydl_opts.items() if k not in (
+            'progress_hooks', 'postprocessor_hooks'
+        )}
+        # 确保 outtmpl 指向正确的输出目录
+        clean_opts['outtmpl'] = str(output_dir / 'video')
+        clean_opts['format'] = 'bestaudio/best'
+        clean_opts['extract_audio'] = True
+        clean_opts['audio_format'] = 'mp3'
 
-        def _run_loop_forever(loop_to_run):
-            """后台线程运行事件循环"""
-            asyncio.set_event_loop(loop_to_run)
-            loop_to_run.run_forever()
+        opts_json = json.dumps(clean_opts, ensure_ascii=False)
+
+        # 写入临时脚本来执行下载
+        script_content = f"""
+import sys
+import json
+import asyncio
+from pathlib import Path
+from yt_dlp import YoutubeDL
+
+# 初始化独立的事件循环
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
+
+ydl_opts = json.loads({repr(opts_json)})
+
+try:
+    with YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info({repr(url)}, download=True)
+        result = json.dumps({{
+            'title': info.get('title') if info else None,
+            'duration': info.get('duration') if info else None,
+        }})
+        print(result)
+except Exception as e:
+    print(json.dumps{{'error': str(e)}})
+    sys.exit(1)
+"""
+
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as f:
+            f.write(script_content)
+            script_path = f.name
 
         try:
-            loop = asyncio.new_event_loop()
-            # 创建后台线程运行此 loop，使 get_running_loop() 能找到它
-            loop_thread = threading.Thread(target=_run_loop_forever, args=(loop,), daemon=True)
-            loop_thread.start()
-            # 等待 loop 开始运行
-            while not loop.is_running():
-                time.sleep(0.001)
-        except Exception:
-            pass
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                logger.info(f"Downloaded video: {info.get('title', 'unknown')}")
-                return {
-                    'title': info.get('title'),
-                    'duration': info.get('duration'),
-                }
-        except Exception as e:
-            logger.error(f"Download error: {e}")
-            raise BilibiliDownloadError(
-                message=f"Failed to download video: {str(e)}",
-                url=url,
+            result = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True, text=True, timeout=300
             )
+            if result.returncode != 0:
+                raise BilibiliDownloadError(
+                    message=f"Failed to download video: {result.stderr.strip()}",
+                    url=url,
+                )
+            output = result.stdout.strip()
+            try:
+                data = json.loads(output)
+                if 'error' in data:
+                    raise BilibiliDownloadError(
+                        message=f"Failed to download video: {data['error']}",
+                        url=url,
+                    )
+                logger.info(f"Downloaded video: {data.get('title', 'unknown')}")
+                return data
+            except json.JSONDecodeError:
+                raise BilibiliDownloadError(
+                    message=f"Failed to parse download result: {output}",
+                    url=url,
+                )
         finally:
-            if loop is not None:
-                loop.close()
-            if loop_thread is not None:
-                loop_thread.join(timeout=1)
+            Path(script_path).unlink(missing_ok=True)
 
     async def get_video_info(self, url: str) -> dict:
         """
@@ -439,25 +483,7 @@ class BilibiliDownloader:
         loop = asyncio.get_event_loop()
 
         def _extract_info():
-            import threading
-
-            # 为线程创建后台事件循环，使 yt_dlp 的 get_running_loop 能找到 loop
-            loop = None
-            loop_thread = None
-
-            def _run_loop_forever(loop_to_run):
-                asyncio.set_event_loop(loop_to_run)
-                loop_to_run.run_forever()
-
-            try:
-                loop = asyncio.new_event_loop()
-                loop_thread = threading.Thread(target=_run_loop_forever, args=(loop,), daemon=True)
-                loop_thread.start()
-                while not loop.is_running():
-                    time.sleep(0.001)
-            except Exception:
-                pass
-
+            # 全局 loop 已在模块加载时启动，patched get_event_loop 让工作线程也能访问
             ydl_opts = {
                 'quiet': True,
                 'no_warnings': True,
@@ -467,22 +493,16 @@ class BilibiliDownloader:
                     'Referer': 'https://www.bilibili.com',
                 },
             }
-            try:
-                with YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    return {
-                        'title': info.get('title', ''),
-                        'duration': info.get('duration', 0),
-                        'uploader': info.get('uploader', ''),
-                        'description': info.get('description', ''),
-                        'view_count': info.get('view_count', 0),
-                        'like_count': info.get('like_count', 0),
-                    }
-            finally:
-                if loop is not None:
-                    loop.close()
-                if loop_thread is not None:
-                    loop_thread.join(timeout=1)
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return {
+                    'title': info.get('title', ''),
+                    'duration': info.get('duration', 0),
+                    'uploader': info.get('uploader', ''),
+                    'description': info.get('description', ''),
+                    'view_count': info.get('view_count', 0),
+                    'like_count': info.get('like_count', 0),
+                }
 
         return await loop.run_in_executor(None, _extract_info)
 
@@ -744,25 +764,7 @@ class BilibiliSpaceDownloader:
         loop = asyncio.get_event_loop()
 
         def _fetch():
-            import threading
-
-            # 为线程创建后台事件循环，使 yt_dlp 的 get_running_loop 能找到 loop
-            loop = None
-            loop_thread = None
-
-            def _run_loop_forever(loop_to_run):
-                asyncio.set_event_loop(loop_to_run)
-                loop_to_run.run_forever()
-
-            try:
-                loop = asyncio.new_event_loop()
-                loop_thread = threading.Thread(target=_run_loop_forever, args=(loop,), daemon=True)
-                loop_thread.start()
-                while not loop.is_running():
-                    time.sleep(0.001)
-            except Exception:
-                pass
-
+            # 全局 loop 已在模块加载时启动，patched get_event_loop 让工作线程也能访问
             space_url = f"https://space.bilibili.com/{uid}/video"
             ydl_opts = {
                 'quiet': True,
@@ -771,7 +773,7 @@ class BilibiliSpaceDownloader:
                 'playlist_items': f'1-{limit}',  # 限制数量
                 'http_headers': self._get_headers(),
             }
-            # 使用 netscape cookie 文件（避免 yt-dlp 内部 asyncio 问题）
+            # 使用 netscape cookie 文件
             cookie_file = self._write_cookie_file()
             if cookie_file:
                 ydl_opts['cookies'] = str(cookie_file)
@@ -832,11 +834,6 @@ class BilibiliSpaceDownloader:
                     message=f"Failed to get space videos: {error_str}",
                     details={"uid": uid},
                 )
-            finally:
-                if loop is not None:
-                    loop.close()
-                if loop_thread is not None:
-                    loop_thread.join(timeout=1)
 
         if progress_callback:
             progress_callback(0, "正在获取视频列表...")

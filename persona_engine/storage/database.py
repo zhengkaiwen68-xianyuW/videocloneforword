@@ -13,7 +13,7 @@ from typing import AsyncGenerator
 from sqlalchemy import text, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import NullPool
 
 from ..core.config import config
 from ..core.exceptions import DatabaseError
@@ -61,6 +61,8 @@ class Database:
 
         database_url = f"sqlite+aiosqlite:///{db_path}"
 
+        # 使用 NullPool 替代 StaticPool，让 aiosqlite 自行管理连接池
+        # 这样每次连接时都会执行 PRAGMA 设置（WAL 模式在每个新连接上都需要设置）
         self._engine = create_async_engine(
             database_url,
             echo=db_config.echo,
@@ -68,10 +70,11 @@ class Database:
             connect_args={
                 "timeout": 30,  # 等待 30 秒而不是立刻抛出 database is locked
             },
-            poolclass=StaticPool,
+            poolclass=NullPool,
         )
 
         # 强制开启 WAL 模式 (Write-Ahead Logging) 以支持并发读写
+        # NullPool 每次获取连接都会触发 connect 事件
         @event.listens_for(self._engine.sync_engine, "connect")
         def set_sqlite_pragma(dbapi_connection, connection_record):
             cursor = dbapi_connection.cursor()
@@ -121,7 +124,10 @@ class Database:
             await session.rollback()
             raise
         finally:
-            await session.close()
+            try:
+                await session.close()
+            except Exception as e:
+                logger.warning(f"Session close failed: {e}")
 
     async def create_tables(self) -> None:
         """创建所有表"""

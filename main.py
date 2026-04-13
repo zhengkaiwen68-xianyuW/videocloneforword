@@ -19,16 +19,17 @@ else:
 sys.path.insert(0, base_dir)
 os.chdir(base_dir)
 
+# =============================================================================
+# 重要修复：yt-dlp 内部使用 asyncio.get_running_loop()，但在 run_in_executor
+# 的工作线程中会失败。使用统一的 asyncio_patch 模块避免多处 patch 冲突。
+# =============================================================================
+from persona_engine.core.asyncio_patch import apply_patch
+apply_patch()
+
 # 设置环境变量让 SQLAlchemy 能找到模块
-import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
-
-import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -94,9 +95,12 @@ def get_app():
         lifespan=lifespan,
     )
 
+    # CORS 配置
+    # 开发环境允许 localhost，生产环境应明确配置
+    cors_origins = os.environ.get("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -158,5 +162,6 @@ def get_app():
     return app
 
 if __name__ == "__main__":
+    import asyncio
     app = get_app()
     uvicorn.run(app, host="127.0.0.1", port=8080, log_level="info")

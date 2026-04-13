@@ -788,6 +788,62 @@ async def cancel_video_task(task_id: str):
         raise HTTPException(status_code=500, detail=e.to_dict())
 
 
+@router.get("/video-tasks")
+async def get_video_tasks():
+    """
+    GET /v1/video-tasks
+
+    获取所有视频处理任务状态（PRD 定义的标准接口）
+    返回正在运行的任务列表及其状态
+    """
+    try:
+        # 获取注册的所有任务
+        registered_task_ids = task_registry.list_tasks()
+
+        # 获取所有 personas 状态
+        all_personas = await persona_repo.get_all()
+
+        running_tasks = []
+        for persona in all_personas:
+            raw = persona.raw_json if isinstance(persona.raw_json, dict) else {}
+            status = raw.get("status", "unknown")
+
+            # 确定是否为当前正在运行的任务
+            task_id = f"persona_{persona.id}"
+            is_registered = task_id in registered_task_ids
+
+            # 如果任务注册表中存在，或状态为 processing/running，则视为运行中
+            if is_registered or status in ("processing", "running"):
+                running_tasks.append({
+                    "task_id": task_id,
+                    "persona_id": persona.id,
+                    "name": persona.name,
+                    "status": status,
+                    "video_count": len(persona.source_asr_texts) if persona.source_asr_texts else 0,
+                    "is_registered": is_registered,
+                })
+
+        return {
+            "total": len(running_tasks),
+            "tasks": running_tasks,
+            "registered_tasks": registered_task_ids,
+        }
+    except PersonaEngineException as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+
+
+@router.get("/tasks")
+async def list_tasks():
+    """
+    GET /v1/tasks
+
+    获取所有注册的后台任务（调试用）
+    """
+    return {
+        "tasks": task_registry.list_tasks(),
+    }
+
+
 @router.get("/tasks/interrupted")
 async def get_interrupted_tasks():
     """
@@ -1210,7 +1266,16 @@ async def run_persona_from_videos_task(
         return progress_callback
 
     async def _is_task_cancelled(persona_id: str) -> bool:
-        """检查任务是否已被取消"""
+        """检查任务是否已被取消
+
+        优先使用内存中的取消标志（task_registry.is_cancelled），避免频繁 DB 查询。
+        只有在内存标志不存在时才回退到 DB 查询。
+        """
+        task_id = f"persona_{persona_id}"
+        # 优先检查内存标志
+        if task_registry.is_cancelled(task_id):
+            return True
+        # 回退到 DB 查询（用于其他途径触发的取消，如直接数据库修改）
         try:
             persona = await persona_repo.get_by_id(persona_id)
             if persona and persona.raw_json:
@@ -1256,9 +1321,29 @@ async def run_persona_from_videos_task(
                     cancel_flag = True
                     try:
                         process.terminate()
-                    except Exception:
+                    except ProcessLookupError:
+                        # 进程已结束
                         pass
+                    except OSError as e:
+                        logger.warning(f"Failed to terminate Whisper process: {e}")
                     break
+
+        # 确保进程被正确终止的辅助函数
+        async def ensure_process_terminated():
+            """等待进程终止，必要时强制 kill"""
+            try:
+                # 先尝试正常终止
+                await asyncio.wait_for(process.wait(), timeout=2.0)
+            except asyncio.TimeoutError:
+                # 超时后强制 kill
+                try:
+                    process.kill()
+                    await process.wait()
+                except ProcessLookupError:
+                    # 进程已结束
+                    pass
+                except OSError as e:
+                    logger.warning(f"Failed to kill Whisper process: {e}")
 
         # 启动监控任务
         watcher = asyncio.create_task(watch_cancel())
@@ -1269,11 +1354,23 @@ async def run_persona_from_videos_task(
         except Exception as e:
             logger.error(f"Whisper 进程通信错误: {e}")
             watcher.cancel()
+            try:
+                await watcher  # 等待 watcher 真正结束
+            except asyncio.CancelledError:
+                pass
+            # 确保进程被终止
+            await ensure_process_terminated()
             return None
 
         watcher.cancel()
+        try:
+            await watcher  # 等待 watcher 真正结束
+        except asyncio.CancelledError:
+            pass
 
         if cancel_flag:
+            # 任务被取消，确保进程被终止
+            await ensure_process_terminated()
             return None
 
         if process.returncode != 0:
