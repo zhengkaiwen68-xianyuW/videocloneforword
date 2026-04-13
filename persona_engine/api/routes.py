@@ -850,16 +850,16 @@ async def get_video_tasks():
         # 获取所有视频处理任务
         all_tasks = await video_task_repo.list_tasks(limit=100, offset=0)
 
-        # 获取人格名称映射
+        # 获取人格名称映射（使用批量查询避免 N+1 问题）
         persona_names = {}
         persona_ids = list(set(t.persona_id for t in all_tasks))
-        for pid in persona_ids:
+        if persona_ids:
             try:
-                persona = await persona_repo.get_by_id(pid)
-                if persona:
-                    persona_names[pid] = persona.name
+                personas = await persona_repo.get_by_ids(persona_ids)
+                for persona in personas:
+                    persona_names[persona.id] = persona.name
             except Exception:
-                persona_names[pid] = "未知"
+                pass  # 批量查询失败时保持为空，使用默认值
 
         # 构建任务列表
         tasks = []

@@ -39,6 +39,26 @@ _asyncio_loop = get_global_loop()
 # 视频分割标记（用于分隔多个视频的ASR结果）
 VIDEO_SPLIT_MARKER = "|||BILI_ASR_SPLIT|||"
 
+# 临时脚本文件注册表，用于进程退出时清理
+# 解决 subprocess.run() 执行期间进程被杀死时 temp 文件未清理的问题
+_temp_script_files: set = set()
+_temp_script_lock = threading.Lock()
+
+
+def _cleanup_temp_scripts():
+    """进程退出时清理所有注册的临时脚本文件"""
+    with _temp_script_lock:
+        for script_path in list(_temp_script_files):
+            try:
+                Path(script_path).unlink(missing_ok=True)
+                _temp_script_files.discard(script_path)
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp script {script_path}: {e}")
+
+
+# 注册进程退出时的清理函数
+atexit.register(_cleanup_temp_scripts)
+
 
 class DownloadStatus(Enum):
     """下载状态"""
@@ -440,6 +460,10 @@ except Exception as e:
             f.write(script_content)
             script_path = f.name
 
+        # 注册到清理注册表，确保进程被杀时 atexit 仍能清理
+        with _temp_script_lock:
+            _temp_script_files.add(script_path)
+
         try:
             result = subprocess.run(
                 [sys.executable, script_path],
@@ -466,7 +490,10 @@ except Exception as e:
                     url=url,
                 )
         finally:
+            # 清理临时脚本文件
             Path(script_path).unlink(missing_ok=True)
+            with _temp_script_lock:
+                _temp_script_files.discard(script_path)
 
     async def get_video_info(self, url: str) -> dict:
         """

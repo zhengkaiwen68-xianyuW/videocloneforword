@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update, delete, desc, func
+from sqlalchemy import select, update, delete, desc, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import PersonaNotFoundError, DatabaseError, StorageError
@@ -301,16 +301,15 @@ class PersonaRepository:
             cutoff_time = dt.now() - threshold
 
             async with self.db.session() as session:
-                # 查找所有超过阈值的 persona，在 Python 中过滤 processing 状态
+                # 使用 SQL JSON 提取直接在数据库层面过滤，避免加载所有数据到内存
+                # SQLite 的 json_extract 提取 raw_json.status 字段
                 result = await session.execute(
-                    select(PersonaModel).where(PersonaModel.created_at < cutoff_time)
+                    select(PersonaModel).where(
+                        PersonaModel.created_at < cutoff_time,
+                        func.json_extract(PersonaModel.raw_json, '$.status') == 'processing'
+                    )
                 )
-                all_stale = result.scalars().all()
-
-                stale_models = [
-                    m for m in all_stale
-                    if (m.raw_json or {}).get("status") == "processing"
-                ]
+                stale_models = result.scalars().all()
 
                 if not stale_models:
                     return 0
