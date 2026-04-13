@@ -1,0 +1,54 @@
+# 深度审查标准检查清单 (CODE_REVIEW_CHECKLIST.md)
+
+> AI 助手读取指引：当你接收到本项目相关的代码编写、修改或审查任务时，必须首选加载并阅读本清单。持续维护：如果在后续开发中发现了新的 Bug 或架构缺陷，必须将该 Bug 的特征、原因及预防措施总结并追加到本清单的"历史故障库"中。强制自检：在输出任何代码方案前，请对照以下准则逐一排查，并在回复中声明已通过自检。
+
+---
+
+## 一、 语法与依赖规范 (Syntax & Imports)
+
+- [ ] SQLAlchemy 导入对齐：在使用 `desc()`, `func()`, `update()`, `select()` 等 ORM 函数时，必须确认文件顶部已从 `sqlalchemy` 正确导入。
+- [ ] 死代码清理：严禁保留未使用的 `import`（如残留的 `aiohttp` 或 `os`），保持代码库纯净。
+- [ ] 类型声明：所有 Repository 和 Service 层的方法必须标注类型注解，确保静态分析工具能捕捉类型不匹配。
+
+---
+
+## 二、 异步与并发安全 (Async & Concurrency)
+
+- [ ] Await 完整性：所有被定义为 `async def` 的方法，在调用时必须使用 `await`。特别注意 LLM 接口和数据库 IO 接口。
+- [ ] 非阻塞隔离：严禁在 FastAPI 的 async 事件循环中直接执行 CPU 密集型（如模型计算）或 IO 阻塞型（如 yt-dlp 下载）操作。必须使用 `asyncio.to_thread()` 或 `ProcessPoolExecutor`。
+- [ ] 闭包变量捕获：在 for 循环中定义 lambda 或 `add_done_callback` 时，必须使用默认参数绑定（如 `tid=task_id`），严禁直接捕获循环变量名。
+
+---
+
+## 三、 数据完整性与持久化 (Data & Storage)
+
+- [ ] 全链路字段对齐：修改数据库 Model 时，必须同步更新 PersonaRepository 的转换逻辑、`core/types.py` 中的数据类以及 API 的 Response 模型。
+- [ ] 序列化无损还原：对于存储在 `raw_json` 中的嵌套对象（如 `deep_psychology`），在读取时必须有显式的解析与实例化逻辑，严禁返回空对象或丢失深度特征。
+- [ ] 高效聚合查询：统计记录总数严禁使用 `len(result.all())`（会加载全表数据），必须使用 `select(func.count()).select_from(...)`。
+
+---
+
+## 四、 基础设施专项 (Infrastructure)
+
+### 4.1 B 站下载器 (Bilibili Downloader)
+
+- [ ] Cookie 存活预检：批量任务开始前必须调用鉴权接口检查 Cookie 有效性，失效时立即熔断并通知用户，防止封禁 IP。
+- [ ] 多模式切换：优先支持 `api_mode: "app"` 或 `"tv"` 绕过 Web 端严格的 WBI 签名风控。
+- [ ] 指数退避重试：捕获 412 Precondition Failed 后必须执行指数退避逻辑。
+
+### 4.2 Whisper ASR 模块
+
+- [ ] 显存彻底释放：Whisper 推理必须在独立子进程中运行。当任务取消时，必须通过 SIGTERM 或重启进程池来物理回收显存。
+- [ ] VAD 时间轴校准：使用 `vad_filter` 时，需确保 VoiceAnalyzer 计算停顿时考虑了 VAD 导致的静音切除偏移。
+
+---
+
+## 五、 历史故障库 (Historical Bug Database)
+
+| ID | 故障现象 | 根本原因 | 预防措施 |
+|---|---|---|---|
+| #001 | `desc` NameError，导致视频任务列表接口崩溃 | `persona_repo.py` 漏导 `desc` from sqlalchemy | 强制执行"语法与依赖规范"检查 |
+| #002 | 任务取消不掉 Whisper，协程阻塞且未销毁进程 | 取消标志轮询间隔过长且子进程未强杀 | 使用多进程模式并轮询取消标志 |
+| #003 | 重写版本数据丢失 | Model 与 Profile 转换逻辑未覆盖 `deep_psychology` | 执行"数据完整性"交叉检查 |
+| #004 | 任务进度更新 TypeError，导致视频处理崩溃 | 业务函数参数定义与 Repository 不匹配（`failed_urls` 遗漏） | 强制检查函数签名的一致性 |
+| #005 | 内存注册表注销错误，batch 任务 callback 指向错误 task_id | 循环中 lambda 捕获了错误的 `task_id`（闭包变量延迟绑定） | 循环内回调必须使用默认参数绑定 |
