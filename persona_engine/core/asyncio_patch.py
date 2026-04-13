@@ -42,8 +42,15 @@ _original_get_event_loop = asyncio.get_event_loop
 
 
 def _patched_get_running_loop():
-    """返回全局 loop（模拟有 running loop）"""
-    return _asyncio_loop
+    """
+    返回当前线程的 running loop。
+    - 主线程（FastAPI/Uvicorn）有自己的 running loop，直接返回，不干预。
+    - 工作线程（yt-dlp executor）没有 running loop，返回全局后台 loop。
+    """
+    try:
+        return _original_get_running_loop()
+    except RuntimeError:
+        return _asyncio_loop
 
 
 def _patched_get_event_loop():
