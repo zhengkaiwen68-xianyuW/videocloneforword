@@ -1286,8 +1286,9 @@ async def run_persona_from_videos_task(
         total = len(video_urls)
         logger.info(f"Task {task_id}: Starting persona creation from {total} videos")
 
-        # 逐个处理视频（每个视频有超时保护）
-        VIDEO_TIMEOUT_SECONDS = 300  # 5分钟超时
+        # 基础超时配置（兜底）
+        BASE_DL_TIMEOUT = 180  # 3分钟
+        BASE_ASR_TIMEOUT = 60  # 1分钟
 
         for i, url in enumerate(video_urls):
             bv_id = extract_bv_from_url(url)
@@ -1297,8 +1298,27 @@ async def run_persona_from_videos_task(
                 logger.info(f"[Task {task_id}] 检测到取消信号，停止下载 {url}")
                 break
 
+            # ==========================================
+            # 步骤 0：获取视频时长，用于动态计算超时
+            # ==========================================
             try:
-                logger.info(f"Task {task_id} [{i+1}/{total}]: Downloading {url}")
+                video_info = await downloader.get_video_info(url)
+                duration_sec = video_info.get("duration", 0)
+                if duration_sec <= 0:
+                    duration_sec = 600  # 默认 10 分钟
+                logger.info(f"[Task {task_id}] 视频 {bv_id} 时长: {duration_sec} 秒")
+            except Exception as e:
+                logger.warning(f"[Task {task_id}] 获取视频 {bv_id} 信息失败: {e}，使用默认时长 600 秒")
+                duration_sec = 600
+
+            # 动态超时计算
+            # 下载超时：基础 3 分钟 + 视频时长 * 0.2（网络情况不好时留足余量）
+            dl_timeout = BASE_DL_TIMEOUT + (duration_sec * 0.2)
+            # 转写超时：基础 1 分钟 + 视频时长 * 2.5（保护本地显卡/CPU不被无限占用）
+            asr_timeout = BASE_ASR_TIMEOUT + (duration_sec * 2.5)
+
+            try:
+                logger.info(f"Task {task_id} [{i+1}/{total}]: Downloading {url} (动态超时: {dl_timeout:.0f}秒)")
 
                 # 更新进度为开始下载
                 await _update_persona_progress(
@@ -1315,10 +1335,10 @@ async def run_persona_from_videos_task(
                 # 创建进度回调
                 progress_cb = create_progress_callback(persona_id, total, i, bv_id)
 
-                # 下载视频并提取音频（带超时保护）
+                # 【步骤 1】：动态超时下载
                 audio_path = await asyncio.wait_for(
                     downloader.download_and_extract_audio(url, progress_callback=progress_cb),
-                    timeout=VIDEO_TIMEOUT_SECONDS,
+                    timeout=dl_timeout,
                 )
                 audio_paths.append(audio_path)
 
@@ -1341,18 +1361,37 @@ async def run_persona_from_videos_task(
                     failed=failed,
                 )
 
-                # 执行ASR转写（带检查点和子进程强杀机制）
+                # 【步骤 2】：动态超时转写（Whisper）
+                logger.info(f"Task {task_id} [{i+1}/{total}]: 开始转写 (动态超时: {asr_timeout:.0f}秒)")
                 asr_text = await asyncio.wait_for(
                     extract_asr_with_checkpoint(persona_id, audio_path),
-                    timeout=VIDEO_TIMEOUT_SECONDS,
+                    timeout=asr_timeout,
                 )
 
-                # 返回 None 说明转写被中途中断
+                # 返回 None 说明转写被中途中断（用户取消）
                 if asr_text is None:
                     logger.info(f"[Task {task_id}] 转写被强制中断，清理文件: {audio_path}")
                     if os.path.exists(audio_path):
                         os.remove(audio_path)
                     break
+
+                # 检查是否为空文本
+                if not asr_text or len(asr_text.strip()) == 0:
+                    logger.warning(f"[Task {task_id}] 转写结果为空，跳过: {url}")
+                    failed += 1
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                    await _update_persona_progress(
+                        persona_id=persona_id,
+                        completed=completed,
+                        total=total,
+                        current_index=i,
+                        current_phase="failed",
+                        current_progress=0.0,
+                        current_bv_id=bv_id,
+                        failed=failed,
+                    )
+                    continue
 
                 all_results.append({
                     "index": i,
@@ -1381,13 +1420,17 @@ async def run_persona_from_videos_task(
 
             except asyncio.TimeoutError:
                 failed += 1
-                logger.error(f"Task {task_id} [{i+1}/{total}] timed out after {VIDEO_TIMEOUT_SECONDS}s")
+                timeout_type = "下载" if not audio_paths or url not in str(audio_paths) else "转写"
+                logger.error(f"[Task {task_id}] [{i+1}/{total}] {timeout_type}超时 ({dl_timeout:.0f}s 或 {asr_timeout:.0f}s)！跳过视频: {url}")
                 all_results.append({
                     "index": i,
                     "url": url,
                     "bv_id": bv_id,
-                    "error": f"Timeout after {VIDEO_TIMEOUT_SECONDS}s",
+                    "error": f"Timeout ({timeout_type}) after {dl_timeout:.0f}s/{asr_timeout:.0f}s",
                 })
+                # 确保临时文件被清理
+                if 'audio_path' in locals() and os.path.exists(audio_path):
+                    os.remove(audio_path)
                 # 更新失败进度
                 await _update_persona_progress(
                     persona_id=persona_id,
@@ -1408,6 +1451,9 @@ async def run_persona_from_videos_task(
                     "bv_id": bv_id,
                     "error": str(e),
                 })
+                # 确保临时文件被清理
+                if 'audio_path' in locals() and os.path.exists(audio_path):
+                    os.remove(audio_path)
                 # 更新失败进度
                 await _update_persona_progress(
                     persona_id=persona_id,
