@@ -1095,7 +1095,7 @@ async def run_persona_from_videos_task(
     video_urls: list[str],
 ):
     """
-    后台任务：从视频创建新人格
+    后台任务：从视频创建新人格（带检查点机制和子进程强杀）
 
     ==========================================================================
     B站下载入口 #3 - 创建人格后台任务
@@ -1109,6 +1109,7 @@ async def run_persona_from_videos_task(
     ==========================================================================
     """
     import re as regex_module
+    import os
     from persona_engine.asr.bilibili_downloader import (
         BilibiliDownloader,
         VIDEO_SPLIT_MARKER,
@@ -1150,6 +1151,79 @@ async def run_persona_from_videos_task(
             ))
         return progress_callback
 
+    async def _is_task_cancelled(persona_id: str) -> bool:
+        """检查任务是否已被取消"""
+        try:
+            persona = await persona_repo.get_by_id(persona_id)
+            if persona and persona.raw_json:
+                import json as _json
+                raw = persona.raw_json if isinstance(persona.raw_json, dict) else _json.loads(persona.raw_json)
+                return raw.get("status") == "cancelled"
+        except Exception:
+            pass
+        return False
+
+    async def extract_asr_with_checkpoint(persona_id: str, audio_path: str) -> str | None:
+        """执行 Whisper 转写，通过并行协程监控取消状态并强制释放算力"""
+        from persona_engine.core.config import config as engine_config
+
+        whisper_config = engine_config.whisper
+        cmd = [
+            "whisper", audio_path,
+            "--model", whisper_config.model_size,
+            "--language", whisper_config.language or "zh",
+            "--device", whisper_config.device or "cpu",
+        ]
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as e:
+            logger.error(f"启动 Whisper 进程失败: {e}")
+            # 降级到同步转写
+            asr_result = transcriber.transcribe(audio_path)
+            return asr_result.text if asr_result else ""
+
+        cancel_flag = False
+
+        async def watch_cancel():
+            nonlocal cancel_flag
+            while process.returncode is None:
+                await asyncio.sleep(2)  # 每 2 秒检查一次状态
+                if await _is_task_cancelled(persona_id):
+                    logger.info(f"[Task persona_{persona_id}] 任务被取消！强杀 Whisper (PID: {process.pid})")
+                    cancel_flag = True
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    break
+
+        # 启动监控任务
+        watcher = asyncio.create_task(watch_cancel())
+
+        # 等待进程执行完毕（或被 kill）
+        try:
+            stdout, stderr = await process.communicate()
+        except Exception as e:
+            logger.error(f"Whisper 进程通信错误: {e}")
+            watcher.cancel()
+            return None
+
+        watcher.cancel()
+
+        if cancel_flag:
+            return None
+
+        if process.returncode != 0:
+            logger.error(f"Whisper 进程异常退出 (code={process.returncode}): {stderr.decode()}")
+            return None
+
+        return stdout.decode('utf-8').strip()
+
     try:
         total = len(video_urls)
         logger.info(f"Task {task_id}: Starting persona creation from {total} videos")
@@ -1159,6 +1233,11 @@ async def run_persona_from_videos_task(
 
         for i, url in enumerate(video_urls):
             bv_id = extract_bv_from_url(url)
+
+            # 【检查点 1】：下载前状态检查
+            if await _is_task_cancelled(persona_id):
+                logger.info(f"[Task {task_id}] 检测到取消信号，停止下载 {url}")
+                break
 
             try:
                 logger.info(f"Task {task_id} [{i+1}/{total}]: Downloading {url}")
@@ -1185,6 +1264,13 @@ async def run_persona_from_videos_task(
                 )
                 audio_paths.append(audio_path)
 
+                # 【检查点 2】：转写前状态检查与垃圾清理
+                if await _is_task_cancelled(persona_id):
+                    logger.info(f"[Task {task_id}] 检测到取消信号，放弃转写并清理: {audio_path}")
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                    break
+
                 # 更新进度为转写阶段
                 await _update_persona_progress(
                     persona_id=persona_id,
@@ -1197,20 +1283,27 @@ async def run_persona_from_videos_task(
                     failed=failed,
                 )
 
-                # 执行ASR转写（带超时保护）
-                asr_result = await asyncio.wait_for(
-                    asyncio.to_thread(transcriber.transcribe, audio_path),
+                # 执行ASR转写（带检查点和子进程强杀机制）
+                asr_text = await asyncio.wait_for(
+                    extract_asr_with_checkpoint(persona_id, audio_path),
                     timeout=VIDEO_TIMEOUT_SECONDS,
                 )
+
+                # 返回 None 说明转写被中途中断
+                if asr_text is None:
+                    logger.info(f"[Task {task_id}] 转写被强制中断，清理文件: {audio_path}")
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+                    break
 
                 all_results.append({
                     "index": i,
                     "url": url,
                     "bv_id": bv_id,
-                    "text": asr_result.text,
+                    "text": asr_text,
                 })
                 completed += 1
-                logger.info(f"Task {task_id} [{i+1}/{total}]: Transcribed {len(asr_result.text)} chars")
+                logger.info(f"Task {task_id} [{i+1}/{total}]: Transcribed {len(asr_text)} chars")
 
                 # 每完成1个视频即更新进度
                 await _update_persona_progress(
@@ -1223,6 +1316,10 @@ async def run_persona_from_videos_task(
                     current_bv_id=bv_id,
                     failed=failed,
                 )
+
+                # 正常完成清理临时音频
+                if os.path.exists(audio_path):
+                    os.remove(audio_path)
 
             except asyncio.TimeoutError:
                 failed += 1

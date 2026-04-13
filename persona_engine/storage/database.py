@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncGenerator
 
-from sqlalchemy import text
+from sqlalchemy import text, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import StaticPool
@@ -65,9 +65,19 @@ class Database:
             database_url,
             echo=db_config.echo,
             pool_pre_ping=True,
-            connect_args={"timeout": 30},
+            connect_args={
+                "timeout": 30,  # 等待 30 秒而不是立刻抛出 database is locked
+            },
             poolclass=StaticPool,
         )
+
+        # 强制开启 WAL 模式 (Write-Ahead Logging) 以支持并发读写
+        @event.listens_for(self._engine.sync_engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA synchronous=NORMAL")
+            cursor.close()
 
         self._session_factory = async_sessionmaker(
             bind=self._engine,
@@ -75,7 +85,7 @@ class Database:
             expire_on_commit=False,
         )
 
-        logger.info(f"Database initialized: {db_path}")
+        logger.info(f"Database initialized: {db_path} (WAL mode enabled)")
 
     @property
     def engine(self):
