@@ -13,14 +13,14 @@ audit:
 bilibili:
   access_token: ''
   api_mode: web
-  cookie: my_real_cookie_value_here
+  cookie: SESSDATA=668bb844%2C1791476436%2C32dad%2A41CjD3v0VIa42ZvkGiAAokYSM3LzXN1vFHLVEfztBykw7O5iHAoZZdLvrX5ZrY9ZGjXc0SVjBYZkptZ1NXLTV0ZDFZRi1aT3U3b19YZ2dlN1ZuQUg0WXl1LTJEdmVlUGZBUXdGU1hpeVNnQ3h2NlJKUnhpY0RqWm1QLW5KNW5ydjhLSU9wbnFobXJ3IIEC;
+    BUVID3=CC2111C0-F206-F117-1B5D-BAE8D8F46ACB00394infoc; BILI_JCT=d1b0e84e362b0db5a429e9c1500052fe
   delay_per_page: 5.0
-  max_interval: 10.0
+  max_interval: 50.0
   max_retries: 15
-  min_interval: 8.0
+  min_interval: 6.0
   retry_base_delay: 2.0
-  user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
-    like Gecko) Chrome/120.0.0.0 Safari/537.36
+  user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWeb...
 database:
   path: persona_engine.db
 minimax:

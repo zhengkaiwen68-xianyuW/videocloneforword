@@ -114,6 +114,11 @@ def get_app():
 
     @app.exception_handler(Exception)
     async def general_exception_handler(request: Request, exc: Exception):
+        # 排除 FastAPI 内置异常，避免覆盖默认的 422/404 等处理
+        from fastapi import HTTPException
+        from fastapi.exceptions import RequestValidationError
+        if isinstance(exc, (HTTPException, RequestValidationError)):
+            raise exc  # 让 FastAPI 默认处理器处理
         logger.error(f"Unhandled exception: {exc}", exc_info=True)
         return JSONResponse(
             status_code=500,

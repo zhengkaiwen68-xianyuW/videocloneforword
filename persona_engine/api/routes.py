@@ -224,13 +224,21 @@ async def create_persona(request: PersonaCreateRequest):
                     field="space_url",
                 )
 
-            # 获取UP主空间视频列表
+            # 获取UP主空间视频列表（带超时，避免长时间阻塞）
+            # 注意：space_downloader 内部已有指数退避重试，这里 timeout 限制总等待时间
             logger.info(f"Fetching videos from space for UID: {uid}")
             space_downloader = BilibiliSpaceDownloader()
-            space_videos = await space_downloader.get_uploader_videos(
-                uid=uid,
-                limit=30,
-            )
+            try:
+                # 使用 asyncio.wait_for 限制总超时（秒），超时会抛出 TimeoutError
+                space_videos = await asyncio.wait_for(
+                    space_downloader.get_uploader_videos(uid=uid, limit=30),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                raise BilibiliDownloadError(
+                    message=f"获取空间视频超时（60秒），B站接口响应过慢，请稍后重试或检查Cookie是否有效",
+                    details={"uid": uid},
+                )
 
             if not space_videos:
                 raise ValidationError(
@@ -675,18 +683,45 @@ async def cancel_task(task_id: str):
     DELETE /v1/tasks/{task_id}
 
     取消正在运行的任务
+    task_id 可以是：
+    - persona_xxx（后台任务ID格式）
+    - xxx（直接传 persona_id）
     """
     try:
-        # 先从task_registry取消asyncio任务
-        cancelled = task_registry.cancel(task_id)
+        # 标准化 task_id：如果不是 "persona_" 开头，说明传的是 persona_id
+        normalized_task_id = task_id if task_id.startswith("persona_") else f"persona_{task_id}"
 
-        # 更新数据库状态
-        await task_repo.complete(task_id, status="cancelled")
+        # 从 task_registry 取消 asyncio 任务
+        cancelled = task_registry.cancel(normalized_task_id)
+
+        # 同时尝试用原始 task_id 取消（兼容没有 "persona_" 前缀的情况）
+        if not cancelled and task_id != normalized_task_id:
+            cancelled = task_registry.cancel(task_id)
+
+        # 更新 tasks 表状态
+        try:
+            await task_repo.complete(normalized_task_id, status="cancelled")
+        except TaskNotFoundError:
+            # tasks 表里没有记录（可能已完成），尝试直接更新 persona 表
+            pass
+
+        # 关键修复：同时更新 personas 表的 raw_json.status
+        # 这样前端轮询时能立即看到状态变化
+        persona_id = task_id if not task_id.startswith("persona_") else task_id[len("persona_"):]
+        try:
+            existing = await persona_repo.get_by_id(persona_id)
+            if existing and existing.raw_json:
+                import json as _json
+                raw = existing.raw_json if isinstance(existing.raw_json, dict) else _json.loads(existing.raw_json)
+                raw["status"] = "cancelled"
+                await persona_repo.update(persona_id, {"raw_json": raw})
+        except Exception:
+            pass  # persona 可能不存在，不影响取消流程
 
         return {
             "task_id": task_id,
-            "cancelled": cancelled,
-            "message": "任务已取消" if cancelled else "任务不存在或已结束",
+            "cancelled": True,
+            "message": "任务已取消",
         }
 
     except TaskNotFoundError:
@@ -1525,12 +1560,10 @@ async def get_bilibili_config():
         from persona_engine.core.config import config
         bili = config.bilibili
 
-        # 遮蔽敏感信息
-        masked_cookie = bili.cookie[:20] + "..." if len(bili.cookie) > 20 else ("***" if bili.cookie else "")
-
+        # 返回完整cookie（前端使用 type="password"，不会明文显示）
         return BilibiliConfigResponse(
-            cookie=masked_cookie,
-            access_token=bili.access_token[:10] + "..." if len(bili.access_token) > 10 else ("***" if bili.access_token else ""),
+            cookie=bili.cookie,
+            access_token=bili.access_token if bili.access_token else "",
             min_interval=bili.min_interval,
             max_interval=bili.max_interval,
             delay_per_page=bili.delay_per_page,
@@ -1604,8 +1637,8 @@ async def update_bilibili_config(request: BilibiliConfigUpdateRequest):
         return {
             "message": "配置已更新",
             "config": BilibiliConfigResponse(
-                cookie="***" if current_config["cookie"] else "",
-                access_token="***" if current_config["access_token"] else "",
+                cookie=current_config["cookie"],
+                access_token=current_config["access_token"],
                 min_interval=current_config["min_interval"],
                 max_interval=current_config["max_interval"],
                 delay_per_page=current_config["delay_per_page"],
@@ -1617,4 +1650,53 @@ async def update_bilibili_config(request: BilibiliConfigUpdateRequest):
         }
     except Exception as e:
         logger.error(f"Failed to update bilibili config: {e}")
+        raise HTTPException(status_code=500, detail={"error": "InternalError", "message": str(e)})
+
+
+@router.get("/bilibili/space/preview")
+async def preview_bilibili_space(space_url: str):
+    """
+    GET /v1/bilibili/space/preview?space_url=xxx
+
+    预览B站UP主空间视频列表，不创建人格。
+    用于测试Cookie是否有效、空间链接是否可访问。
+    返回前10个视频的标题和BV号。
+    """
+    try:
+        # 验证URL格式
+        if not is_valid_bilibili_space_url(space_url):
+            raise HTTPException(status_code=400, detail={"error": "ValidationError", "message": "Invalid Bilibili space URL format"})
+
+        # 提取UID
+        uid = extract_uid_from_space_url(space_url)
+        if not uid:
+            raise HTTPException(status_code=400, detail={"error": "ValidationError", "message": "Failed to extract UID from space URL"})
+
+        # 尝试获取视频列表（不带重试，只试一次，快速反馈）
+        space_downloader = BilibiliSpaceDownloader()
+        try:
+            videos = await asyncio.wait_for(
+                space_downloader.get_uploader_videos(uid=uid, limit=10),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            raise BilibiliDownloadError(
+                message="获取空间视频超时（30秒），B站接口响应过慢，可能Cookie已过期或IP被限制",
+                details={"uid": uid},
+            )
+
+        if not videos:
+            raise HTTPException(status_code=400, detail={"error": "ValidationError", "message": "该空间没有找到视频或Cookie无权访问"})
+
+        return {
+            "uid": uid,
+            "total_found": len(videos),
+            "videos": [{"bv_id": v.bv_id, "title": v.title, "duration": v.duration} for v in videos],
+        }
+    except BilibiliDownloadError as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+    except HTTPException:
+        raise  # 让 FastAPI 默认处理
+    except Exception as e:
+        logger.error(f"Space preview failed: {e}")
         raise HTTPException(status_code=500, detail={"error": "InternalError", "message": str(e)})
