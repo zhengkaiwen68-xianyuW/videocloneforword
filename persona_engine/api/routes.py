@@ -668,6 +668,16 @@ async def get_task_status(task_id: str):
     try:
         status = await task_repo.get_status(task_id)
 
+        # 计算已用时间
+        created_at_str = status.get("created_at")
+        elapsed_seconds = 0.0
+        if created_at_str:
+            try:
+                created_at = datetime.fromisoformat(created_at_str)
+                elapsed_seconds = (datetime.now() - created_at).total_seconds()
+            except Exception:
+                elapsed_seconds = 0.0
+
         return TaskStatusResponse(
             task_id=status["task_id"],
             status=status["status"],
@@ -676,7 +686,7 @@ async def get_task_status(task_id: str):
             best_score=status["best_score"],
             best_text=status["best_text"],
             history_count=status["history_count"],
-            elapsed_seconds=0.0,  # 简化处理
+            elapsed_seconds=round(elapsed_seconds, 1),
         )
 
     except TaskNotFoundError:

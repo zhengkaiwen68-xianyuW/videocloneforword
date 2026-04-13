@@ -9,11 +9,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update, delete, desc
+from sqlalchemy import select, update, delete, desc, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import PersonaNotFoundError, DatabaseError, StorageError
 from ..core.types import (
+    DeepPsychology,
     LogicArchitecture,
     PersonalityProfile,
     TemporalPattern,
@@ -248,9 +249,9 @@ class PersonaRepository:
         try:
             async with self.db.session() as session:
                 result = await session.execute(
-                    select(PersonaModel.id)
+                    select(func.count()).select_from(PersonaModel)
                 )
-                return len(result.scalars().all())
+                return result.scalar() or 0
         except Exception as e:
             raise DatabaseError(
                 message=f"Failed to count personas: {str(e)}",
@@ -342,6 +343,16 @@ class PersonaRepository:
         """
         logic_arch_data = model.logic_architecture or {}
         temporal_data = model.temporal_patterns or {}
+        raw_json_data = model.raw_json or {}
+
+        # 从 raw_json 还原 deep_psychology（存储时保存在 raw_json.deep_psychology）
+        deep_psy_data = raw_json_data.get("deep_psychology", {})
+        deep_psychology = DeepPsychology(
+            emotional_tone=deep_psy_data.get("emotional_tone", "平稳中立"),
+            emotional_arc=deep_psy_data.get("emotional_arc", ["引入", "展开", "收尾"]),
+            rhetorical_devices=deep_psy_data.get("rhetorical_devices", []),
+            lexicon=deep_psy_data.get("lexicon", []),
+        )
 
         return PersonalityProfile(
             id=model.id,
@@ -360,7 +371,8 @@ class PersonaRepository:
                 speech_rhythm=temporal_data.get("speech_rhythm", "medium"),
                 excitement_curve=temporal_data.get("excitement_curve", []),
             ),
-            raw_json=model.raw_json or {},
+            deep_psychology=deep_psychology,
+            raw_json=raw_json_data,
             source_asr_texts=model.source_asr_texts or [],
             created_at=model.created_at,
             updated_at=model.updated_at,

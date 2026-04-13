@@ -8,7 +8,6 @@ import json
 import logging
 from typing import Any
 
-import aiohttp
 import httpx
 
 from ..core.config import config
