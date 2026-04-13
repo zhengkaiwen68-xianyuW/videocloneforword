@@ -130,55 +130,16 @@ class Database:
                 logger.warning(f"Session close failed: {e}")
 
     async def create_tables(self) -> None:
-        """创建所有表"""
+        """创建所有表 (使用 SQLAlchemy 自动化管理)
+
+        使用 Base.metadata.create_all 自动根据模型定义创建表，
+        确保模型与表结构完全一致，避免手动写 SQL 导致的维护割裂问题。
+        """
         try:
-            # 使用同步 sqlite3 直接创建表（避免 aiosqlite 在 Windows 上的问题）
-            import sqlite3
-            db_path = Path(config.database.path)
-            if not db_path.is_absolute():
-                db_path = Path(__file__).parent.parent / config.database.path
-
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-
-            # 创建 personas 表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS personas (
-                    id VARCHAR(36) PRIMARY KEY,
-                    name VARCHAR(255) NOT NULL,
-                    verbal_tics JSON NOT NULL DEFAULT '[]',
-                    grammar_prefs JSON NOT NULL DEFAULT '[]',
-                    logic_architecture JSON NOT NULL DEFAULT '{}',
-                    temporal_patterns JSON NOT NULL DEFAULT '{}',
-                    raw_json JSON NOT NULL DEFAULT '{}',
-                    source_asr_texts JSON NOT NULL DEFAULT '[]',
-                    created_at DATETIME NOT NULL,
-                    updated_at DATETIME NOT NULL
-                )
-            """)
-
-            # 创建 rewrite_tasks 表
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS rewrite_tasks (
-                    id VARCHAR(36) PRIMARY KEY,
-                    source_text TEXT NOT NULL,
-                    persona_ids JSON NOT NULL DEFAULT '[]',
-                    locked_terms JSON NOT NULL DEFAULT '[]',
-                    status VARCHAR(50) NOT NULL DEFAULT 'pending',
-                    best_text TEXT DEFAULT '',
-                    best_score FLOAT NOT NULL DEFAULT 0.0,
-                    best_iteration INTEGER NOT NULL DEFAULT 0,
-                    history_versions JSON NOT NULL DEFAULT '[]',
-                    intermediate_results JSON NOT NULL DEFAULT '[]',
-                    error_message TEXT,
-                    created_at DATETIME NOT NULL,
-                    completed_at DATETIME
-                )
-            """)
-
-            conn.commit()
-            conn.close()
-            logger.info("Database tables created via sqlite3")
+            # 使用 async engine 运行同步的 create_all
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables created via SQLAlchemy metadata")
         except Exception as e:
             raise DatabaseError(
                 message=f"Failed to create tables: {str(e)}",
@@ -262,3 +223,25 @@ class RewriteTaskModel(Base):
     error_message: Mapped[str] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     completed_at: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+class VideoProcessingTaskModel(Base):
+    """视频处理任务表
+
+    用于追踪人格创建过程中的视频 ASR 提取进度，支持断点续传。
+    """
+    __tablename__ = "video_processing_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    video_urls: Mapped[list] = mapped_column(JSON, default=list)
+    completed_urls: Mapped[list] = mapped_column(JSON, default=list)
+    failed_urls: Mapped[list] = mapped_column(JSON, default=list)
+    current_index: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(50), default="pending")  # pending/processing/completed/failed/cancelled
+    asr_texts: Mapped[list] = mapped_column(JSON, default=list)
+    error_message: Mapped[str] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now
+    )

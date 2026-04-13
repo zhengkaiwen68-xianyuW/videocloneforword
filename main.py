@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 # 延迟导入以确保路径正确
 def get_app():
+    import asyncio
     from persona_engine.core.config import config
     from persona_engine.core.exceptions import PersonaEngineException
     from persona_engine.storage.database import database
@@ -75,6 +76,41 @@ def get_app():
             interrupted_count = await task_repo.mark_running_as_interrupted()
             if interrupted_count > 0:
                 logger.warning(f"Marked {interrupted_count} interrupted tasks")
+
+            # ==========================================================================
+            # 断点续传扫描：检查并恢复未完成的视频处理任务
+            # ==========================================================================
+            from persona_engine.storage.persona_repo import VideoTaskRepository
+            from persona_engine.api.routes import video_task_repo
+
+            video_task_repo_instance = VideoTaskRepository()
+            unfinished_tasks = await video_task_repo_instance.get_unfinished_tasks()
+
+            if unfinished_tasks:
+                logger.info(f"Found {len(unfinished_tasks)} unfinished video processing tasks, checking for resume...")
+
+                for task in unfinished_tasks:
+                    # 计算未完成的视频列表
+                    completed_urls = set(task.completed_urls or [])
+                    failed_urls = set(task.failed_urls or [])
+                    all_urls = task.video_urls or []
+                    remaining_urls = [
+                        url for url in all_urls
+                        if url not in completed_urls and url not in failed_urls
+                    ]
+
+                    if not remaining_urls:
+                        # 所有视频都已处理完毕，标记为完成
+                        await video_task_repo_instance.update_status(task.id, "completed")
+                        logger.info(f"Task {task.id}: All videos processed, marked as completed")
+                    else:
+                        # 有未完成的视频，需要继续处理
+                        logger.info(f"Task {task.id}: Resuming with {len(remaining_urls)} remaining videos")
+                        # 注意：这里只更新状态为 pending，不自动启动恢复
+                        # 因为当前视频的 persona 可能已经被用户删除
+                        # 真正的恢复应该在人格详情页面由用户触发
+                        await video_task_repo_instance.update_status(task.id, "pending")
+                        logger.info(f"Task {task.id}: Marked as pending for manual resume")
 
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")

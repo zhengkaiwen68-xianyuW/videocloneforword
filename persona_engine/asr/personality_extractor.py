@@ -120,7 +120,7 @@ class PersonaInhibitor:
         ]
         return refined[:10]
 
-    def generate_persona_report(self, asr_data_list: list[dict]) -> dict:
+    async def generate_persona_report(self, asr_data_list: list[dict]) -> dict:
         """
         步骤 2: AI 特征压缩与归纳
 
@@ -175,7 +175,7 @@ class PersonaInhibitor:
 
         # 4. 调用 LLM 获取画像
         if self.llm:
-            persona_json = self.llm.generate_json(prompt=prompt)
+            persona_json = await self.llm.generate_json(prompt=prompt)
         else:
             # 无 LLM 时返回统计结果
             persona_json = {
@@ -224,7 +224,7 @@ class PersonalityExtractor:
     def __init__(self, llm_adapter=None):
         self.llm_adapter = llm_adapter
 
-    def extract(self, texts: list[str], author_name: str) -> PersonalityProfile:
+    async def extract(self, texts: list[str], author_name: str) -> PersonalityProfile:
         """
         从多篇文本中提取人格特征
 
@@ -251,7 +251,7 @@ class PersonalityExtractor:
         ]
 
         # 生成画像
-        persona_dict = inhibitor.generate_persona_report(asr_data_list)
+        persona_dict = await inhibitor.generate_persona_report(asr_data_list)
 
         import uuid
         persona_id = str(uuid.uuid4())[:8]

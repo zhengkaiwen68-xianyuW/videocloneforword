@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update, delete
+from sqlalchemy import select, update, delete, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import PersonaNotFoundError, DatabaseError, StorageError
@@ -18,7 +18,7 @@ from ..core.types import (
     PersonalityProfile,
     TemporalPattern,
 )
-from .database import database, PersonaModel
+from .database import database, PersonaModel, VideoProcessingTaskModel
 
 
 logger = logging.getLogger(__name__)
@@ -583,4 +583,269 @@ class TaskRepository:
                 message=f"Failed to complete task: {str(e)}",
                 operation="complete",
                 details={"task_id": task_id},
+            )
+
+
+class VideoTaskRepository:
+    """
+    视频处理任务的存储库
+
+    支持：
+    - 任务创建与查询
+    - 高频进度更新（局部更新，避免并发冲突）
+    - 断点续传（查询 pending/processing 状态任务）
+    """
+
+    def __init__(self):
+        self.db = database
+
+    async def create(
+        self,
+        task_id: str,
+        persona_id: str,
+        video_urls: list[str],
+    ) -> VideoProcessingTaskModel:
+        """
+        创建新的视频处理任务
+
+        Args:
+            task_id: 任务ID
+            persona_id: 关联的人格ID
+            video_urls: 视频链接列表
+
+        Returns:
+            创建的任务模型
+        """
+        try:
+            async with self.db.session() as session:
+                task = VideoProcessingTaskModel(
+                    id=task_id,
+                    persona_id=persona_id,
+                    video_urls=video_urls,
+                    status="pending",
+                    completed_urls=[],
+                    failed_urls=[],
+                    asr_texts=[],
+                )
+                session.add(task)
+                await session.flush()
+                await session.refresh(task)
+                return task
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to create video task: {str(e)}",
+                operation="create",
+                details={"task_id": task_id, "persona_id": persona_id},
+            )
+
+    async def get(self, task_id: str) -> VideoProcessingTaskModel | None:
+        """
+        获取指定的视频处理任务详情
+
+        Args:
+            task_id: 任务ID
+
+        Returns:
+            任务模型或 None
+        """
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(VideoProcessingTaskModel)
+                    .where(VideoProcessingTaskModel.id == task_id)
+                )
+                return result.scalar_one_or_none()
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get video task: {str(e)}",
+                operation="get",
+                details={"task_id": task_id},
+            )
+
+    async def update_progress(
+        self,
+        task_id: str,
+        current_index: int,
+        completed_urls: list[str] | None = None,
+        failed_urls: list[str] | None = None,
+        asr_texts: list[str] | None = None,
+    ) -> bool:
+        """
+        增量更新任务进度（每完成一个视频或发生错误时调用）
+
+        使用 update 语句进行局部更新，避免并发覆写。
+        completed_urls / failed_urls / asr_texts 会与现有数据合并，而非替换。
+
+        Args:
+            task_id: 任务ID
+            current_index: 当前处理到的视频索引
+            completed_urls: 新增完成的URL列表（会合并）
+            failed_urls: 新增失败的URL列表（会合并）
+            asr_texts: 新增的ASR文本列表（会合并）
+
+        Returns:
+            是否更新成功
+        """
+        try:
+            async with self.db.session() as session:
+                # 先获取现有数据
+                result = await session.execute(
+                    select(VideoProcessingTaskModel)
+                    .where(VideoProcessingTaskModel.id == task_id)
+                )
+                task = result.scalar_one_or_none()
+                if not task:
+                    return False
+
+                # 增量合并
+                update_data = {
+                    "current_index": current_index,
+                    "updated_at": datetime.now(),
+                }
+
+                if completed_urls is not None:
+                    existing_completed = list(task.completed_urls or [])
+                    update_data["completed_urls"] = existing_completed + completed_urls
+                if failed_urls is not None:
+                    existing_failed = list(task.failed_urls or [])
+                    update_data["failed_urls"] = existing_failed + failed_urls
+                if asr_texts is not None:
+                    existing_asr = list(task.asr_texts or [])
+                    update_data["asr_texts"] = existing_asr + asr_texts
+
+                await session.execute(
+                    update(VideoProcessingTaskModel)
+                    .where(VideoProcessingTaskModel.id == task_id)
+                    .values(**update_data)
+                )
+                await session.commit()
+                return True
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to update video task progress: {str(e)}",
+                operation="update_progress",
+                details={"task_id": task_id},
+            )
+
+    async def update_status(
+        self,
+        task_id: str,
+        status: str,
+        error_message: str | None = None,
+    ) -> bool:
+        """
+        更新任务状态
+
+        Args:
+            task_id: 任务ID
+            status: 新状态 (pending/processing/completed/failed/cancelled)
+            error_message: 错误信息（可选）
+
+        Returns:
+            是否更新成功
+        """
+        try:
+            async with self.db.session() as session:
+                update_data = {
+                    "status": status,
+                    "updated_at": datetime.now(),
+                }
+                if error_message is not None:
+                    update_data["error_message"] = error_message
+
+                result = await session.execute(
+                    update(VideoProcessingTaskModel)
+                    .where(VideoProcessingTaskModel.id == task_id)
+                    .values(**update_data)
+                )
+                await session.commit()
+                return result.rowcount > 0
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to update video task status: {str(e)}",
+                operation="update_status",
+                details={"task_id": task_id, "status": status},
+            )
+
+    async def list_tasks(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[VideoProcessingTaskModel]:
+        """
+        获取任务列表（分页，按创建时间倒序）
+
+        Args:
+            limit: 每页数量
+            offset: 偏移量
+
+        Returns:
+            任务列表
+        """
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(VideoProcessingTaskModel)
+                    .order_by(desc(VideoProcessingTaskModel.created_at))
+                    .limit(limit)
+                    .offset(offset)
+                )
+                return list(result.scalars().all())
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to list video tasks: {str(e)}",
+                operation="list_tasks",
+            )
+
+    async def get_unfinished_tasks(self) -> list[VideoProcessingTaskModel]:
+        """
+        获取所有未完成的任务（服务器重启时调用，用于断点续传）
+
+        Returns:
+            pending 或 processing 状态的任务列表
+        """
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(VideoProcessingTaskModel)
+                    .where(VideoProcessingTaskModel.status.in_(["pending", "processing"]))
+                    .order_by(VideoProcessingTaskModel.created_at)
+                )
+                return list(result.scalars().all())
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get unfinished tasks: {str(e)}",
+                operation="get_unfinished_tasks",
+            )
+
+    async def get_by_persona(self, persona_id: str) -> list[VideoProcessingTaskModel]:
+        """
+        获取指定人格下的所有任务
+
+        Args:
+            persona_id: 人格ID
+
+        Returns:
+            任务列表
+        """
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(VideoProcessingTaskModel)
+                    .where(VideoProcessingTaskModel.persona_id == persona_id)
+                    .order_by(desc(VideoProcessingTaskModel.created_at))
+                )
+                return list(result.scalars().all())
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get tasks by persona: {str(e)}",
+                operation="get_by_persona",
+                details={"persona_id": persona_id},
             )

@@ -35,7 +35,7 @@ from persona_engine.core.types import (
     DeepPsychology,
 )
 from persona_engine.core.task_registry import task_registry
-from persona_engine.storage.persona_repo import PersonaRepository, TaskRepository
+from persona_engine.storage.persona_repo import PersonaRepository, TaskRepository, VideoTaskRepository
 from persona_engine.asr.personality_extractor import PersonalityExtractor
 from persona_engine.asr.bilibili_downloader import (
     BilibiliSpaceDownloader,
@@ -53,6 +53,7 @@ router = APIRouter()
 # 仓储实例
 persona_repo = PersonaRepository()
 task_repo = TaskRepository()
+video_task_repo = VideoTaskRepository()
 
 
 # ========== 请求/响应模型 ==========
@@ -283,6 +284,13 @@ async def create_persona(request: PersonaCreateRequest):
             )
             await persona_repo.create(profile)
 
+            # 创建视频处理任务记录（用于断点续传）
+            await video_task_repo.create(
+                task_id=task_id,
+                persona_id=persona_id,
+                video_urls=request.video_urls,
+            )
+
             # 启动后台任务：从视频提取ASR并计算人格
             # 使用 asyncio.create_task + task_registry 进行追踪，以便 shutdown 时取消
             logger.info(f"Creating task {task_id} for persona {persona_id} with {len(request.video_urls)} videos")
@@ -295,7 +303,7 @@ async def create_persona(request: PersonaCreateRequest):
             )
             logger.info(f"Task {task_id} created, registered: {task_registry.list_tasks()}")
             task_registry.register(task_id, task)
-            task.add_done_callback(lambda t: task_registry.unregister(task_id))
+            task.add_done_callback(lambda t, tid=task_id: task_registry.unregister(tid))
             logger.info(f"Task {task_id} fully registered, done={task.done()}")
 
             return PersonaCreateResponse(
@@ -306,7 +314,7 @@ async def create_persona(request: PersonaCreateRequest):
 
         # 如果提供了 ASR 文本，直接生成人格
         extractor = PersonalityExtractor()
-        profile = extractor.extract(
+        profile = await extractor.extract(
             texts=request.source_texts,
             author_name=request.name,
         )
@@ -517,7 +525,7 @@ async def batch_rewrite(request: BatchRewriteRequestModel):
                 )
             )
             task_registry.register(task_id, task)
-            task.add_done_callback(lambda t: task_registry.unregister(task_id))
+            task.add_done_callback(lambda t, tid=task_id: task_registry.unregister(tid))
 
             task_ids.append(task_id)
 
@@ -748,6 +756,12 @@ async def cancel_video_task(task_id: str):
         persona_id = task_id if not task_id.startswith("persona_") else task_id[len("persona_"):]
         response_message = "取消指令已下发，后台算力资源将在数秒内释放。"
 
+        # 3.1 更新 VideoTask 状态为 cancelled
+        try:
+            await video_task_repo.update_status(normalized_task_id, "cancelled")
+        except Exception as e:
+            logger.warning(f"Task {task_id}: Failed to update video task status: {e}")
+
         try:
             existing = await persona_repo.get_by_id(persona_id)
             if existing:
@@ -793,39 +807,56 @@ async def get_video_tasks():
     """
     GET /v1/video-tasks
 
-    获取所有视频处理任务状态（PRD 定义的标准接口）
-    返回正在运行的任务列表及其状态
+    获取所有视频处理任务状态（使用 VideoTaskRepository 实现）
+    返回所有任务及其实时状态
     """
     try:
-        # 获取注册的所有任务
+        # 获取注册的所有任务ID（用于判断是否正在运行）
         registered_task_ids = task_registry.list_tasks()
 
-        # 获取所有 personas 状态
-        all_personas = await persona_repo.get_all()
+        # 获取所有视频处理任务
+        all_tasks = await video_task_repo.list_tasks(limit=100, offset=0)
 
-        running_tasks = []
-        for persona in all_personas:
-            raw = persona.raw_json if isinstance(persona.raw_json, dict) else {}
-            status = raw.get("status", "unknown")
+        # 获取人格名称映射
+        persona_names = {}
+        persona_ids = list(set(t.persona_id for t in all_tasks))
+        for pid in persona_ids:
+            try:
+                persona = await persona_repo.get_by_id(pid)
+                if persona:
+                    persona_names[pid] = persona.name
+            except Exception:
+                persona_names[pid] = "未知"
 
-            # 确定是否为当前正在运行的任务
-            task_id = f"persona_{persona.id}"
-            is_registered = task_id in registered_task_ids
+        # 构建任务列表
+        tasks = []
+        for task in all_tasks:
+            # 判断是否为当前正在运行的任务
+            is_registered = task.id in registered_task_ids
 
-            # 如果任务注册表中存在，或状态为 processing/running，则视为运行中
-            if is_registered or status in ("processing", "running"):
-                running_tasks.append({
-                    "task_id": task_id,
-                    "persona_id": persona.id,
-                    "name": persona.name,
-                    "status": status,
-                    "video_count": len(persona.source_asr_texts) if persona.source_asr_texts else 0,
-                    "is_registered": is_registered,
-                })
+            # 计算进度
+            total = len(task.video_urls) if task.video_urls else 0
+            completed = len(task.completed_urls) if task.completed_urls else 0
+            failed = len(task.failed_urls) if task.failed_urls else 0
+            progress_percent = (completed / total * 100) if total > 0 else 0
+
+            tasks.append({
+                "task_id": task.id,
+                "persona_id": task.persona_id,
+                "name": persona_names.get(task.persona_id, "未知"),
+                "status": task.status,
+                "total_videos": total,
+                "completed_videos": completed,
+                "failed_videos": failed,
+                "progress_percent": round(progress_percent, 1),
+                "is_registered": is_registered,
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "updated_at": task.updated_at.isoformat() if task.updated_at else None,
+            })
 
         return {
-            "total": len(running_tasks),
-            "tasks": running_tasks,
+            "total": len(tasks),
+            "tasks": tasks,
             "registered_tasks": registered_task_ids,
         }
     except PersonaEngineException as e:
@@ -1157,6 +1188,7 @@ async def _run_persona_from_videos_task_with_tracking(
 
 
 async def _update_persona_progress(
+    task_id: str,
     persona_id: str,
     completed: int,
     total: int,
@@ -1165,11 +1197,15 @@ async def _update_persona_progress(
     current_progress: float = 0.0,
     current_bv_id: str = None,
     failed: int = 0,
+    completed_urls: list[str] | None = None,
+    failed_urls: list[str] | None = None,
+    asr_texts: list[str] | None = None,
 ):
     """
-    更新人格进度到数据库
+    更新人格进度到数据库（同时更新 personas.raw_json 和 VideoProcessingTask）
 
     Args:
+        task_id: 视频任务ID
         persona_id: 人格ID
         completed: 已完成视频数
         total: 视频总数
@@ -1178,11 +1214,23 @@ async def _update_persona_progress(
         current_progress: 当前视频的进度百分比
         current_bv_id: 当前处理的视频BV号
         failed: 失败的视频数
+        completed_urls: 已完成的URL列表
+        asr_texts: 已提取的ASR文本列表
     """
     try:
+        # 更新 VideoProcessingTask 进度（用于断点续传）
+        await video_task_repo.update_progress(
+            task_id=task_id,
+            current_index=current_index if current_index is not None else completed,
+            completed_urls=completed_urls,
+            failed_urls=failed_urls,
+            asr_texts=asr_texts,
+        )
+
+        # 同时更新 personas.raw_json（保持与现有 UI 的兼容性）
         raw_json = {
             "status": "processing",
-            "task_id": f"persona_{persona_id}",
+            "task_id": task_id,
             "progress": f"{completed}/{total}",
             "completed_videos": completed,
             "total_videos": total,
@@ -1237,12 +1285,15 @@ async def run_persona_from_videos_task(
     completed = 0
     failed = 0
 
+    # 更新 VideoTask 状态为 processing
+    await video_task_repo.update_status(task_id, "processing")
+
     def extract_bv_from_url(url: str) -> str:
         """从URL提取BV号"""
         match = regex_module.search(r'BV[\w]+', url)
         return match.group(0) if match else url
 
-    def create_progress_callback(persona_id: str, total: int, i: int, bv_id: str):
+    def create_progress_callback(task_id: str, persona_id: str, total: int, i: int, bv_id: str):
         """创建进度回调函数"""
         last_update_time = [0]  # 用于限制更新频率
 
@@ -1254,6 +1305,7 @@ async def run_persona_from_videos_task(
             last_update_time[0] = current_time
 
             asyncio.create_task(_update_persona_progress(
+                task_id=task_id,
                 persona_id=persona_id,
                 completed=completed,
                 total=total,
@@ -1419,6 +1471,7 @@ async def run_persona_from_videos_task(
 
                 # 更新进度为开始下载
                 await _update_persona_progress(
+                    task_id=task_id,
                     persona_id=persona_id,
                     completed=completed,
                     total=total,
@@ -1430,7 +1483,7 @@ async def run_persona_from_videos_task(
                 )
 
                 # 创建进度回调
-                progress_cb = create_progress_callback(persona_id, total, i, bv_id)
+                progress_cb = create_progress_callback(task_id, persona_id, total, i, bv_id)
 
                 # 【步骤 1】：动态超时下载
                 audio_path = await asyncio.wait_for(
@@ -1448,6 +1501,7 @@ async def run_persona_from_videos_task(
 
                 # 更新进度为转写阶段
                 await _update_persona_progress(
+                    task_id=task_id,
                     persona_id=persona_id,
                     completed=completed,
                     total=total,
@@ -1479,6 +1533,7 @@ async def run_persona_from_videos_task(
                     if os.path.exists(audio_path):
                         os.remove(audio_path)
                     await _update_persona_progress(
+                        task_id=task_id,
                         persona_id=persona_id,
                         completed=completed,
                         total=total,
@@ -1487,6 +1542,7 @@ async def run_persona_from_videos_task(
                         current_progress=0.0,
                         current_bv_id=bv_id,
                         failed=failed,
+                        failed_urls=[url],
                     )
                     continue
 
@@ -1501,6 +1557,7 @@ async def run_persona_from_videos_task(
 
                 # 每完成1个视频即更新进度
                 await _update_persona_progress(
+                    task_id=task_id,
                     persona_id=persona_id,
                     completed=completed,
                     total=total,
@@ -1509,6 +1566,8 @@ async def run_persona_from_videos_task(
                     current_progress=100.0,
                     current_bv_id=bv_id,
                     failed=failed,
+                    completed_urls=[url],
+                    asr_texts=[asr_text],
                 )
 
                 # 正常完成清理临时音频
@@ -1530,6 +1589,7 @@ async def run_persona_from_videos_task(
                     os.remove(audio_path)
                 # 更新失败进度
                 await _update_persona_progress(
+                    task_id=task_id,
                     persona_id=persona_id,
                     completed=completed,
                     total=total,
@@ -1538,6 +1598,7 @@ async def run_persona_from_videos_task(
                     current_progress=0.0,
                     current_bv_id=bv_id,
                     failed=failed,
+                    failed_urls=[url],
                 )
             except Exception as e:
                 failed += 1
@@ -1553,6 +1614,7 @@ async def run_persona_from_videos_task(
                     os.remove(audio_path)
                 # 更新失败进度
                 await _update_persona_progress(
+                    task_id=task_id,
                     persona_id=persona_id,
                     completed=completed,
                     total=total,
@@ -1561,6 +1623,7 @@ async def run_persona_from_videos_task(
                     current_progress=0.0,
                     current_bv_id=bv_id,
                     failed=failed,
+                    failed_urls=[url],
                 )
 
         # 构建ASR文本
@@ -1573,7 +1636,7 @@ async def run_persona_from_videos_task(
 
         # 使用人格提取器生成画像
         extractor = PersonalityExtractor()
-        profile = extractor.extract(
+        profile = await extractor.extract(
             texts=final_texts,
             author_name=None,  # 保持原有名称
         )
@@ -1606,10 +1669,14 @@ async def run_persona_from_videos_task(
         }
 
         await persona_repo.update(persona_id, updates)
+        # 更新 VideoTask 状态为 completed
+        await video_task_repo.update_status(task_id, "completed")
         logger.info(f"Task {task_id}: Persona {persona_id} created successfully")
 
     except Exception as e:
         logger.error(f"Task {task_id} failed: {e}")
+        # 更新 VideoTask 状态为 failed
+        await video_task_repo.update_status(task_id, "failed", error_message=str(e))
     finally:
         # 清理临时文件
         for audio_path in audio_paths:
@@ -1729,7 +1796,7 @@ async def run_persona_upgrade_task(
 
         # 重新计算人格画像
         extractor = PersonalityExtractor()
-        profile = extractor.extract(
+        profile = await extractor.extract(
             texts=all_texts,
             author_name=existing_persona.name,
         )
