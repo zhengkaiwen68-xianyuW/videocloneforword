@@ -728,6 +728,10 @@ async def cancel_video_task(task_id: str):
 
     取消视频处理任务（PRD 5.1 定义的标准接口）
     支持通过 persona_id 直接取消视频人格创建任务
+
+    脏数据条件清理逻辑：
+    - 如果尚未提取到任何 ASR 文本，物理删除该空壳 Persona
+    - 如果已有部分 ASR 文本，保留数据并标记为 partial_completed
     """
     try:
         # 视频任务的 task_id 格式为 persona_xxx
@@ -740,26 +744,44 @@ async def cancel_video_task(task_id: str):
         if not cancelled and task_id != normalized_task_id:
             cancelled = task_registry.cancel(task_id)
 
-        # 3. 更新 personas 表的 raw_json.status = "cancelled"
-        #    这会触发 run_persona_from_videos_task 中的检查点退出
+        # 3. 获取 persona_id 并执行脏数据条件清理
         persona_id = task_id if not task_id.startswith("persona_") else task_id[len("persona_"):]
+        response_message = "取消指令已下发，后台算力资源将在数秒内释放。"
+
         try:
             existing = await persona_repo.get_by_id(persona_id)
-            if existing and existing.raw_json:
-                import json as _json
-                raw = existing.raw_json if isinstance(existing.raw_json, dict) else _json.loads(existing.raw_json)
-                raw["status"] = "cancelled"
-                await persona_repo.update(persona_id, {"raw_json": raw})
-                logger.info(f"Task {task_id}: Cancelled by user, status set to cancelled in DB")
+            if existing:
+                # 检查已提取的 ASR 文本数量
+                asr_texts = existing.source_asr_texts or []
+
+                if len(asr_texts) == 0:
+                    # 尚未提取到任何语料：这是一个空壳数据，执行物理删除
+                    await persona_repo.delete(persona_id)
+                    response_message += " 由于未提取到任何语料，已物理删除该空壳人格数据。"
+                    logger.info(f"Task {task_id}: No ASR texts extracted, physically deleted persona {persona_id}")
+                else:
+                    # 已经有部分语料：保留数据，更新状态为 partial_completed
+                    import json as _json
+                    raw = existing.raw_json if isinstance(existing.raw_json, dict) else _json.loads(existing.raw_json)
+                    raw["status"] = "partial_completed"
+                    await persona_repo.update(persona_id, {
+                        "raw_json": raw,
+                        "source_asr_texts": asr_texts,
+                    })
+                    response_message += f" 已成功保留 {len(asr_texts)} 个视频的语料，人格状态更新为[部分完成]。"
+                    logger.info(f"Task {task_id}: Partial ASR texts ({len(asr_texts)}), marked as partial_completed")
             else:
-                logger.warning(f"Task {task_id}: Persona not found or no raw_json")
+                logger.warning(f"Task {task_id}: Persona not found")
+
+        except PersonaNotFoundError:
+            logger.warning(f"Task {task_id}: Persona {persona_id} not found, nothing to clean")
         except Exception as e:
-            logger.error(f"Task {task_id}: Failed to update persona status: {e}")
+            logger.error(f"Task {task_id}: Failed to process persona cleanup: {e}")
 
         return {
             "task_id": task_id,
             "status": "cancelled",
-            "message": "任务已取消，Whisper 子进程将在 2-3 秒内被强制终止",
+            "message": response_message,
         }
 
     except PersonaEngineException as e:
