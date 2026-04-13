@@ -1,3 +1,6 @@
 # Test dependencies
-pytest>=7.0.0
-pytest-asyncio>=0.21.0
+# 锁定上限避免 breaking changes：pytest 8.x+ 改了插件加载方式，
+# pytest-asyncio 1.x 改了 asyncio_mode 默认值，两者都需要 asyncio_mode = auto 才能兼容
+pytest>=7.0.0,<9.0.0
+pytest-asyncio>=0.21.0,<1.0.0
+

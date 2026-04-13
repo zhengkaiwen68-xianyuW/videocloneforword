@@ -4,9 +4,6 @@ Tests for core/types.py - data classes and enums
 import pytest
 from datetime import datetime
 
-import sys
-sys.path.insert(0, '..')
-
 from persona_engine.core.types import (
     TaskStatus,
     ConsistencyScore,
@@ -262,6 +259,7 @@ class TestPersonalityProfile:
                 speech_rhythm="medium",
                 excitement_curve=[]
             ),
+            deep_psychology=DeepPsychology(),
         )
         assert profile.created_at is not None
         assert isinstance(profile.created_at, datetime)

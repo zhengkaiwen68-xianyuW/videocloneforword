@@ -7,9 +7,6 @@ Tests for task_registry.py
 import asyncio
 import pytest
 
-import sys
-sys.path.insert(0, '..')
-
 from persona_engine.core.task_registry import TaskRegistry
 
 
@@ -78,10 +75,10 @@ class TestTaskRegistry:
 
         # 注销后，即使取消过，generation 不匹配也返回 False
         self.registry.unregister(task_id)
-        # 因为 task 从 registry 移除后，is_cancelled 检查的是新任务的 generation
+        assert self.registry.is_cancelled(task_id) is False, \
+            "注销后 is_cancelled 应返回 False（generation 不再匹配）"
 
-    @pytest.mark.asyncio
-    async def test_same_id_reuse_after_cancel(self):
+        # 清理
         """
         关键测试：验证同一 ID 重用时，旧任务的取消标志不影响新任务
 
