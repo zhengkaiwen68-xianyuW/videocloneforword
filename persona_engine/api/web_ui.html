@@ -776,9 +776,14 @@
         }
 
         async function cancelTask(taskId) {
-            if (!confirm('确定要取消这个任务吗？')) return;
+            if (!confirm('确定要取消这个任务吗？取消后 Whisper 子进程将在 2-3 秒内被强制终止。')) return;
             try {
-                const resp = await fetch(`/v1/tasks/${taskId}`, { method: 'DELETE' });
+                // 优先使用 PRD 定义的 video-tasks 接口，fallback 到 tasks 接口
+                let resp = await fetch(`/v1/video-tasks/${taskId}`, { method: 'DELETE' });
+                if (!resp.ok) {
+                    // fallback 到旧的 tasks 接口
+                    resp = await fetch(`/v1/tasks/${taskId}`, { method: 'DELETE' });
+                }
                 const data = await resp.json();
                 showToast(data.message || '任务已取消');
                 pollTaskMonitor();

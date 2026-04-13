@@ -698,15 +698,8 @@ async def cancel_task(task_id: str):
         if not cancelled and task_id != normalized_task_id:
             cancelled = task_registry.cancel(task_id)
 
-        # 更新 tasks 表状态
-        try:
-            await task_repo.complete(normalized_task_id, status="cancelled")
-        except TaskNotFoundError:
-            # tasks 表里没有记录（可能已完成），尝试直接更新 persona 表
-            pass
-
-        # 关键修复：同时更新 personas 表的 raw_json.status
-        # 这样前端轮询时能立即看到状态变化
+        # 更新 personas 表的 raw_json.status 为 cancelled
+        # 这会被 run_persona_from_videos_task 中的 _is_task_cancelled() 检查点读取
         persona_id = task_id if not task_id.startswith("persona_") else task_id[len("persona_"):]
         try:
             existing = await persona_repo.get_by_id(persona_id)
@@ -724,8 +717,51 @@ async def cancel_task(task_id: str):
             "message": "任务已取消",
         }
 
-    except TaskNotFoundError:
-        raise HTTPException(status_code=404, detail={"error": "Task not found", "task_id": task_id})
+    except PersonaEngineException as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+
+
+@router.delete("/video-tasks/{task_id}")
+async def cancel_video_task(task_id: str):
+    """
+    DELETE /v1/video-tasks/{task_id}
+
+    取消视频处理任务（PRD 5.1 定义的标准接口）
+    支持通过 persona_id 直接取消视频人格创建任务
+    """
+    try:
+        # 视频任务的 task_id 格式为 persona_xxx
+        normalized_task_id = task_id if task_id.startswith("persona_") else f"persona_{task_id}"
+
+        # 1. 尝试从 task_registry 取消 asyncio 协程
+        cancelled = task_registry.cancel(normalized_task_id)
+
+        # 2. 兼容：也尝试原始 task_id（不带 persona_ 前缀）
+        if not cancelled and task_id != normalized_task_id:
+            cancelled = task_registry.cancel(task_id)
+
+        # 3. 更新 personas 表的 raw_json.status = "cancelled"
+        #    这会触发 run_persona_from_videos_task 中的检查点退出
+        persona_id = task_id if not task_id.startswith("persona_") else task_id[len("persona_"):]
+        try:
+            existing = await persona_repo.get_by_id(persona_id)
+            if existing and existing.raw_json:
+                import json as _json
+                raw = existing.raw_json if isinstance(existing.raw_json, dict) else _json.loads(existing.raw_json)
+                raw["status"] = "cancelled"
+                await persona_repo.update(persona_id, {"raw_json": raw})
+                logger.info(f"Task {task_id}: Cancelled by user, status set to cancelled in DB")
+            else:
+                logger.warning(f"Task {task_id}: Persona not found or no raw_json")
+        except Exception as e:
+            logger.error(f"Task {task_id}: Failed to update persona status: {e}")
+
+        return {
+            "task_id": task_id,
+            "status": "cancelled",
+            "message": "任务已取消，Whisper 子进程将在 2-3 秒内被强制终止",
+        }
+
     except PersonaEngineException as e:
         raise HTTPException(status_code=500, detail=e.to_dict())
 
