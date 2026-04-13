@@ -7,3 +7,6 @@ __pycache__/
 .DS_Store
 .vscode/
 .idea/
+.claude/
+server.log
+SOURCE_CODE.md
