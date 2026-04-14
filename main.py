@@ -94,23 +94,57 @@ def get_app():
                     completed_urls = set(task.completed_urls or [])
                     failed_urls = set(task.failed_urls or [])
                     all_urls = task.video_urls or []
+                    total_count = len(all_urls)
+                    completed_count = len(completed_urls)
+                    failed_count = len(failed_urls)
                     remaining_urls = [
                         url for url in all_urls
                         if url not in completed_urls and url not in failed_urls
                     ]
+                    remaining_count = len(remaining_urls)
+
+                    # 检查关联的人格是否还存在
+                    from persona_engine.storage.persona_repo import PersonaRepository
+                    persona_repo = PersonaRepository()
+                    persona = await persona_repo.get_by_id(task.persona_id)
+                    persona_exists = persona is not None
 
                     if not remaining_urls:
-                        # 所有视频都已处理完毕，标记为完成
-                        await video_task_repo_instance.update_status(task.id, "completed")
-                        logger.info(f"Task {task.id}: All videos processed, marked as completed")
+                        # 所有视频都已处理完毕
+                        if failed_count > 0:
+                            # 有失败的视频：应该是 failed 状态，不是 completed
+                            # 这是 Bug #013 的修复：不能因为 remaining_urls 为空就标记为 completed
+                            logger.warning(
+                                f"[Task {task.id}] All videos processed but {failed_count}/{total_count} failed. "
+                                f"Marking as failed (not completed). "
+                                f"completed={completed_count}, failed={failed_count}"
+                            )
+                            await video_task_repo_instance.update_status(task.id, "failed")
+                        else:
+                            # 全部成功
+                            await video_task_repo_instance.update_status(task.id, "completed")
+                            logger.info(
+                                f"[Task {task.id}] All videos processed successfully, marked as completed "
+                                f"({completed_count}/{total_count})"
+                            )
+                    elif not persona_exists:
+                        # 有未完成视频但人格已被删除：无法继续
+                        logger.warning(
+                            f"[Task {task.id}] Cannot resume: persona '{task.persona_id}' not found. "
+                            f"{remaining_count} videos remaining, {completed_count} completed, {failed_count} failed. "
+                            f"Marking as failed."
+                        )
+                        await video_task_repo_instance.update_status(task.id, "failed")
                     else:
-                        # 有未完成的视频，需要继续处理
-                        logger.info(f"Task {task.id}: Resuming with {len(remaining_urls)} remaining videos")
+                        # 有未完成的视频且人格存在，需要继续处理
+                        logger.info(
+                            f"[Task {task.id}] Resuming with {remaining_count} remaining videos "
+                            f"(persona='{persona.name}', {completed_count} completed, {failed_count} failed)"
+                        )
                         # 注意：这里只更新状态为 pending，不自动启动恢复
-                        # 因为当前视频的 persona 可能已经被用户删除
                         # 真正的恢复应该在人格详情页面由用户触发
                         await video_task_repo_instance.update_status(task.id, "pending")
-                        logger.info(f"Task {task.id}: Marked as pending for manual resume")
+                        logger.info(f"[Task {task.id}] Marked as pending for manual resume")
 
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
@@ -118,9 +152,17 @@ def get_app():
         yield
 
         logger.info("Shutting down Persona Engine API Server...")
-        # 取消所有后台任务
+
+        # 取消所有后台任务并等待完成
         task_registry.cancel_all()
-        await asyncio.sleep(0.5)  # 给任务一些时间响应取消
+        logger.info("Waiting for background tasks to respond to cancellation...")
+        try:
+            await asyncio.wait_for(task_registry.wait_all(timeout=5.0), timeout=6.0)
+            logger.info("All background tasks cancelled successfully")
+        except asyncio.TimeoutError:
+            logger.warning("Some background tasks did not respond to cancellation in time, forcing shutdown")
+
+        # 关闭数据库连接
         await database.close()
         logger.info("Shutdown complete")
 
