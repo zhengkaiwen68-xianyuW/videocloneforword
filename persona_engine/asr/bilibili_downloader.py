@@ -416,6 +416,7 @@ class BilibiliDownloader:
         import sys
         import json
         import tempfile
+        import re
 
         # 将 ydl_opts 序列化（去掉不可序列化的部分）
         clean_opts = {k: v for k, v in ydl_opts.items() if k not in (
@@ -429,7 +430,7 @@ class BilibiliDownloader:
 
         opts_json = json.dumps(clean_opts, ensure_ascii=False)
 
-        # 写入临时脚本来执行下载
+        # 写入临时脚本来执行下载（使用 quiet 模式抑制进度输出）
         script_content = f"""
 import sys
 import json
@@ -442,6 +443,9 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 ydl_opts = json.loads({repr(opts_json)})
+# 强制 quiet 模式，抑制所有输出到 stdout
+ydl_opts['quiet'] = True
+ydl_opts['no_warnings'] = True
 
 try:
     with YoutubeDL(ydl_opts) as ydl:
@@ -452,7 +456,7 @@ try:
         }})
         print(result)
 except Exception as e:
-    print(json.dumps{{'error': str(e)}})
+    print(json.dumps({{'error': str(e)}}))
     sys.exit(1)
 """
 
@@ -477,18 +481,23 @@ except Exception as e:
             output = result.stdout.strip()
             try:
                 data = json.loads(output)
-                if 'error' in data:
+            except json.JSONDecodeError:
+                # 尝试从输出中提取 JSON
+                json_match = re.search(r'\{.*"title".*\}', output)
+                if json_match:
+                    data = json.loads(json_match.group())
+                else:
                     raise BilibiliDownloadError(
-                        message=f"Failed to download video: {data['error']}",
+                        message=f"Failed to parse download result: {output[:200]}",
                         url=url,
                     )
-                logger.info(f"Downloaded video: {data.get('title', 'unknown')}")
-                return data
-            except json.JSONDecodeError:
+            if 'error' in data:
                 raise BilibiliDownloadError(
-                    message=f"Failed to parse download result: {output}",
+                    message=f"Failed to download video: {data['error']}",
                     url=url,
                 )
+            logger.info(f"Downloaded video: {data.get('title', 'unknown')}")
+            return data
         finally:
             # 清理临时脚本文件
             Path(script_path).unlink(missing_ok=True)

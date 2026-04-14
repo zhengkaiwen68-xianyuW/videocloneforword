@@ -17,6 +17,8 @@
 - [ ] Await 完整性：所有被定义为 `async def` 的方法，在调用时必须使用 `await`。特别注意 LLM 接口和数据库 IO 接口。
 - [ ] 非阻塞隔离：严禁在 FastAPI 的 async 事件循环中直接执行 CPU 密集型（如模型计算）或 IO 阻塞型（如 yt-dlp 下载）操作。必须使用 `asyncio.to_thread()` 或 `ProcessPoolExecutor`。
 - [ ] 闭包变量捕获：在 for 循环中定义 lambda 或 `add_done_callback` 时，必须使用默认参数绑定（如 `tid=task_id`），严禁直接捕获循环变量名。
+- [ ] Utility 函数边界测试：所有公共 utility 函数（如 `is_cancelled()`、`get()`）必须测试边界条件：空字符串、None、未注册的 ID。
+- [ ] 集成测试覆盖：核心业务流程（下载→ASR→人格提取、重写→审计）必须有集成测试串烧验证，不能仅靠单元测试。
 
 ---
 
@@ -35,6 +37,7 @@
 - [ ] Cookie 存活预检：批量任务开始前必须调用鉴权接口检查 Cookie 有效性，失效时立即熔断并通知用户，防止封禁 IP。
 - [ ] 多模式切换：优先支持 `api_mode: "app"` 或 `"tv"` 绕过 Web 端严格的 WBI 签名风控。
 - [ ] 指数退避重试：捕获 412 Precondition Failed 后必须执行指数退避逻辑。
+- [ ] JSON 输出隔离：subprocess 执行 yt-dlp 时必须添加 `quiet=True`，并实现 JSON 正则提取兜底，防止进度条污染 stdout。
 
 ### 4.2 Whisper ASR 模块
 
@@ -58,3 +61,8 @@
 | #009 | 任务取消或超时后 Whisper 仍占用 VRAM，下次转写 OOM | `asyncio.to_thread` + CLI subprocess 两条路径均无法物理终止 CUDA 进程，显存不释放 | 所有 Whisper 推理必须通过 `WhisperWorker` 进程池单例，取消时调用 `_restart_executor()` 物理回收 |
 | #010 | 30 个视频任务重复加载 Whisper large-v3，每视频额外耗时 5-10 秒，VRAM 反复分配 | 每次 `WhisperTranscriber()` 实例化或启动 CLI subprocess 都会从磁盘重新加载模型 | 使用 `WhisperWorker` ProcessPoolExecutor 单例：模型常驻子进程，仅取消/故障时重建 |
 | #011 | `excitement_curve` 停顿归属计算错误（语速不均匀时某段停顿会被算入错误片段） | `sum(1 for w in words if w.end <= p.start)` 用词数量索引代替时间戳比较，O(n²) 且逻辑错误 | 改用 `seg_start_time <= p.start < seg_end_time` 时间戳区间比较，O(n) 且语义正确 |
+| #012 | 视频处理"卡死"，所有 ASR 转写返回 None，但无错误日志 | `task_registry.is_cancelled()` 对从未注册的任务返回 True（默认值 0 == 0） | 对未注册任务应返回 False；utility 函数必须测试边界条件（空、None、未注册） |
+| #013 | 断点续传启动时，失败的任务被错误标记为 completed | `remaining_urls` 计算时排除了 `failed_urls`，导致"所有视频都处理完"的错误判断 | 失败的视频不应参与 remaining 计算；断点续传只恢复 pending 状态任务 |
+| #014 | 人格提取成功但更新失败，`NOT NULL constraint failed: personas.name` | `author_name=None` 传入人格提取器，生成的人格 name 为 None | 注释"保持原有名称"应传入原 persona.name，而非 None |
+| #015 | B站视频下载后 JSON 解析失败，错误信息包含 yt-dlp 进度输出 | yt-dlp 默认输出进度条到 stdout，混入 JSON 导致解析失败 | 添加 `quiet=True` 抑制输出；添加 JSON 正则提取兜底 |
+| #016 | 服务重启后端口冲突，旧进程未完全终止导致新服务启动失败 | `taskkill` 命令执行时机不当，进程未完全释放端口即启动新服务 | 使用 `wait=True` 确保进程完全终止；启动前检查端口可用性 |

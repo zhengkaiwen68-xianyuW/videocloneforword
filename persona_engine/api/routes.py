@@ -1556,9 +1556,12 @@ async def run_persona_from_videos_task(
 
         # 使用人格提取器生成画像
         extractor = PersonalityExtractor()
+        # 获取原有人格的名称（用于保持名称不变）
+        existing_persona = await persona_repo.get_by_id(persona_id)
+        original_name = existing_persona.name if existing_persona else None
         profile = await extractor.extract(
             texts=final_texts,
-            author_name=None,  # 保持原有名称
+            author_name=original_name,  # 保持原有名称
         )
 
         # 构建更新字典（与数据库字段对应）

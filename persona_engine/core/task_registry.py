@@ -78,7 +78,10 @@ class TaskRegistry:
 
         只有当任务的 generation 与取消 generation 相同时才返回 True，
         避免新任务重用相同 ID 时被旧任务的取消标志影响。
+        如果任务从未注册过，返回 False。
         """
+        if task_id not in self._task_generation:
+            return False  # 任务从未注册，不是 cancelled
         return self._cancelled_generation.get(task_id, 0) == self._task_generation.get(task_id, 0)
 
     def clear_cancelled_flag(self, task_id: str):
