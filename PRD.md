@@ -380,6 +380,52 @@ bilibili:
 | 资源清理 | 任务完成后清理临时音频文件 |
 | 可观测性 | 详细的日志记录，方便排查问题 |
 
+### 7.1 日志规范（可观测性要求）
+
+**目标**：确保关键节点有日志记录，便于问题排查和系统监控。
+
+#### 需要记录日志的关键节点
+
+| 场景 | 日志级别 | 应记录内容 | 示例 |
+|------|----------|------------|------|
+| 任务开始 | INFO | task_id、视频URL数量 | `开始处理任务 {task_id}，共 {count} 个视频` |
+| 任务成功 | INFO | 完成状态、耗时 | `任务 {task_id} 完成，耗时 {duration}s` |
+| 任务失败 | ERROR | 错误信息、异常详情 | `任务 {task_id} 失败: {error}` |
+| 条件判断分支 | WARNING | 判断依据、决策结果 | `is_cancelled=True（未注册任务），跳过处理` |
+| 外部调用 | INFO | 调用目标、参数、结果 | `调用 MiniMax API，prompt长度={len}` |
+| 状态转换 | INFO | 旧状态、新状态 | `任务状态从 pending -> processing` |
+| 超时/重试 | WARNING | 超时时间、已等待 | `等待 {wait}s 后超时，开始重试` |
+
+#### 日志规范
+
+1. **必须包含 context**：每个日志必须有 task_id 或请求 ID，便于追踪
+2. **静默失败必须记录**：返回 None/False 的分支要用 WARNING 记录
+3. **"不应该发生"的分支**：用 assert 或 ERROR 记录
+4. **避免日志污染**：不记录大对象（如完整音频数据、API 响应体）
+
+#### 示例
+
+```python
+# 好的日志示例
+logger.warning(
+    f"[WhisperWorker][{task_id}] 任务被取消 "
+    f"(cancelled_gen={gen}, task_gen={task_gen}, registered={is_registered})"
+)
+
+# 坏的日志示例
+logger.debug("checking if cancelled")  # 缺少 context
+logger.info("task completed")  # 缺少 task_id
+```
+
+#### 待补充日志清单
+
+| 文件 | 当前状态 | 需要补充 |
+|------|----------|----------|
+| `whisper_worker.py` | 无 WARNING/ERROR 日志 | 取消判断、超时、异常 |
+| `bilibili_downloader.py` | 基础日志 | 下载进度、JSON 解析失败 |
+| `task_registry.py` | 无取消判断日志 | is_cancelled 的边界情况 |
+| `routes.py` | 无详细错误日志 | 人格提取失败、视频处理异常 |
+
 ---
 
 ## 八、待办清单
@@ -408,4 +454,4 @@ bilibili:
 
 ---
 
-*最后更新：2026-04-12*
+*最后更新：2026-04-14*
