@@ -832,8 +832,31 @@
         document.addEventListener('DOMContentLoaded', () => {
             loadAuthors();
             startTaskMonitor();
+            restoreRecentResult();
             addLog('页面加载完成', 'info');
         });
+
+        // Restore recent completed task result on page load
+        async function restoreRecentResult() {
+            try {
+                const resp = await fetch('/v1/tasks/recent');
+                const data = await resp.json();
+
+                if (data.tasks && data.tasks.length > 0) {
+                    // Get the most recent completed task
+                    const recentTask = data.tasks[0];
+
+                    if (recentTask.best_text) {
+                        currentResult = recentTask.best_text;
+                        document.getElementById('resultText').textContent = currentResult;
+                        document.getElementById('scoreValue').textContent = recentTask.best_score.toFixed(1);
+                        addLog(`已恢复最近任务结果 (${recentTask.best_iteration}轮迭代, ${recentTask.best_score.toFixed(1)}分)`, 'info');
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to restore recent result:', e);
+            }
+        }
     </script>
 </body>
 </html>

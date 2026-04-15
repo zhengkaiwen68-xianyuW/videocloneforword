@@ -718,6 +718,54 @@ async def get_task_status(task_id: str):
         raise HTTPException(status_code=500, detail=e.to_dict())
 
 
+class TaskResultResponse(BaseModel):
+    """任务结果响应"""
+    task_id: str
+    status: str
+    best_text: str
+    best_score: float
+    best_iteration: int
+    completed_at: str | None
+
+
+@router.get("/tasks/{task_id}/result", response_model=TaskResultResponse)
+async def get_task_result(task_id: str):
+    """
+    GET /v1/tasks/{id}/result
+
+    获取重写任务的最终结果（用于历史记录恢复）
+    """
+    try:
+        status = await task_repo.get_status(task_id)
+
+        # 只有已完成的任务才返回结果
+        if status["status"] not in ("completed", "completed_below_threshold"):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "TaskNotCompleted",
+                    "message": f"Task is not completed, current status: {status['status']}",
+                    "task_id": task_id,
+                },
+            )
+
+        return TaskResultResponse(
+            task_id=status["task_id"],
+            status=status["status"],
+            best_text=status["best_text"],
+            best_score=status["best_score"],
+            best_iteration=status.get("best_iteration", 0),
+            completed_at=status.get("completed_at"),
+        )
+
+    except TaskNotFoundError:
+        raise HTTPException(status_code=404, detail={"error": "Task not found", "task_id": task_id})
+    except HTTPException:
+        raise
+    except PersonaEngineException as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+
+
 @router.delete("/tasks/{task_id}")
 async def cancel_task(task_id: str):
     """
@@ -917,6 +965,23 @@ async def get_interrupted_tasks():
     """
     try:
         tasks = await task_repo.get_interrupted_tasks()
+        return {
+            "count": len(tasks),
+            "tasks": tasks,
+        }
+    except PersonaEngineException as e:
+        raise HTTPException(status_code=500, detail=e.to_dict())
+
+
+@router.get("/tasks/recent")
+async def get_recent_completed_tasks():
+    """
+    GET /v1/tasks/recent
+
+    获取最近完成的重写任务（用于前端恢复历史结果）
+    """
+    try:
+        tasks = await task_repo.get_recent_completed_tasks(limit=10)
         return {
             "count": len(tasks),
             "tasks": tasks,

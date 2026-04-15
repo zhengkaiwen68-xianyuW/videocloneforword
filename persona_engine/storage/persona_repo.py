@@ -596,6 +596,49 @@ class TaskRepository:
                 details={"task_id": task_id},
             )
 
+    async def get_recent_completed_tasks(self, limit: int = 5) -> list[dict]:
+        """
+        获取最近完成的重写任务（用于前端恢复历史结果）
+
+        Returns:
+            最近完成的任务列表，按完成时间倒序
+        """
+        try:
+            async with self.db.session() as session:
+                from .database import RewriteTaskModel
+
+                result = await session.execute(
+                    select(RewriteTaskModel)
+                    .where(
+                        RewriteTaskModel.status.in_(
+                            ["completed", "completed_below_threshold"]
+                        )
+                    )
+                    .order_by(RewriteTaskModel.completed_at.desc())
+                    .limit(limit)
+                )
+                models = result.scalars().all()
+
+            return [
+                {
+                    "task_id": m.id,
+                    "source_text": m.source_text[:100] + "..." if len(m.source_text) > 100 else m.source_text,
+                    "status": m.status,
+                    "best_score": m.best_score,
+                    "best_text": m.best_text,
+                    "best_iteration": m.best_iteration,
+                    "created_at": m.created_at.isoformat() if m.created_at else None,
+                    "completed_at": m.completed_at.isoformat() if m.completed_at else None,
+                }
+                for m in models
+            ]
+
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get recent completed tasks: {str(e)}",
+                operation="get_recent_completed_tasks",
+            )
+
 
 class VideoTaskRepository:
     """
