@@ -120,7 +120,7 @@ class MiniMaxAdapter:
         max_tokens: int = 2048,
     ) -> str:
         """
-        调用 MiniMax API 生成文本
+        调用 MiniMax API 生成文本（带指数退避重试）
 
         Args:
             prompt: 用户提示词
@@ -135,6 +135,9 @@ class MiniMaxAdapter:
             ModelAPIError: API 调用失败
             JSONParseError: JSON 解析失败
         """
+        import asyncio
+        import random
+
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
@@ -152,36 +155,62 @@ class MiniMaxAdapter:
             "max_tokens": max_tokens,
         }
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                response = await client.post(
-                    f"{self.base_url}/text/chatcompletion_v2",
-                    headers=headers,
-                    json=payload,
-                )
+        max_retries = 3
+        base_delay = 2.0  # 基础延迟秒数
 
-                if response.status_code != 200:
-                    raise ModelAPIError(
-                        message=f"MiniMax API error: {response.status_code}",
-                        provider="minimax",
-                        status_code=response.status_code,
-                        details={"response": response.text[:500]},
+        for attempt in range(max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(
+                        f"{self.base_url}/text/chatcompletion_v2",
+                        headers=headers,
+                        json=payload,
                     )
 
-                result = response.json()
-                return result["choices"][0]["message"]["content"]
+                    if response.status_code == 529:
+                        # 服务过载，使用指数退避重试
+                        if attempt < max_retries - 1:
+                            delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                            logger.warning(
+                                f"MiniMax API 529 (服务过载)，{delay:.1f}秒后重试 "
+                                f"(尝试 {attempt + 1}/{max_retries})"
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        else:
+                            raise ModelAPIError(
+                                message=f"MiniMax API error: {response.status_code} (已重试 {max_retries} 次)",
+                                provider="minimax",
+                                status_code=response.status_code,
+                                details={"response": response.text[:500]},
+                            )
 
-        except httpx.TimeoutException as e:
-            raise ModelAPIError(
-                message=f"MiniMax API timeout: {str(e)}",
-                provider="minimax",
-                details={"timeout": self.timeout},
-            )
-        except httpx.HTTPError as e:
-            raise ModelAPIError(
-                message=f"MiniMax API HTTP error: {str(e)}",
-                provider="minimax",
-            )
+                    if response.status_code != 200:
+                        raise ModelAPIError(
+                            message=f"MiniMax API error: {response.status_code}",
+                            provider="minimax",
+                            status_code=response.status_code,
+                            details={"response": response.text[:500]},
+                        )
+
+                    result = response.json()
+                    return result["choices"][0]["message"]["content"]
+
+            except httpx.TimeoutException as e:
+                raise ModelAPIError(
+                    message=f"MiniMax API timeout: {str(e)}",
+                    provider="minimax",
+                    details={"timeout": self.timeout},
+                )
+            except httpx.HTTPError as e:
+                raise ModelAPIError(
+                    message=f"MiniMax API HTTP error: {str(e)}",
+                    provider="minimax",
+                )
+
+            # 请求之间添加小延迟，避免频率限制
+            if attempt < max_retries - 1:
+                await asyncio.sleep(0.5)
 
     async def generate_json(
         self,
