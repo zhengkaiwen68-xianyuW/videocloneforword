@@ -1,0 +1,29 @@
+# Core
+fastapi>=0.104.0,<1.0.0
+uvicorn[standard]>=0.24.0,<1.0.0
+pydantic>=2.0.0,<3.0.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.0,<3.0.0
+aiosqlite>=0.19.0,<1.0.0
+
+# ASR
+faster-whisper>=1.0.0,<2.0.0
+
+# Video Download
+yt-dlp>=2024.0.0
+
+# HTTP Client
+httpx>=0.25.0,<1.0.0
+
+# NLP
+jieba>=0.42.0,<1.0.0
+numpy>=1.24.0,<2.0.0
+
+# Config
+pyyaml>=6.0,<7.0
+python-dotenv>=1.0.0,<2.0.0
+
+# RAG
+chromadb>=0.4.0,<1.0.0
+sentence-transformers>=2.2.0,<3.0.0

@@ -10,7 +10,7 @@ from typing import Any
 
 from ..core.types import PersonalityProfile, LogicArchitecture, TemporalPattern
 from ..core.exceptions import ReverseExtractionError
-from ..rewrite.minimax_adapter import MiniMaxAdapter
+from ..llm.minimax import MiniMaxAdapter
 
 
 logger = logging.getLogger(__name__)

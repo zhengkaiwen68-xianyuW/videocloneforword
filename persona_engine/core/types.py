@@ -93,6 +93,137 @@ class DeepPsychology:
     lexicon: list[str] = field(default_factory=list)  # 专属高频词汇库 (实词)
 
 
+class HookType(str, Enum):
+    """黄金3秒钩子类型"""
+    REVERSE_LOGIC = "reverse_logic"           # 反逻辑：打破常识
+    PAIN_POINT = "pain_point"                 # 痛点刺痛：直接戳焦虑
+    BENEFIT_BOMB = "benefit_bomb"             # 利益炸弹：极低成本极高认知
+    SUSPENSE_CUTOFF = "suspense_cutoff"       # 悬念断句：话说一半
+    AUTHORITY_SUBVERT = "authority_subvert"    # 权威颠覆：借权威反权威
+    DATA_IMPACT = "data_impact"               # 数据冲击：用数字制造震撼
+    IDENTITY_LABEL = "identity_label"         # 身份标签：给观众贴标签
+
+
+@dataclass
+class TopicTechnique:
+    """选题技法画像"""
+    angle_patterns: list[str] = field(default_factory=list)       # 角度偏好：反常识/痛点前置/数据碾压
+    pain_points: list[str] = field(default_factory=list)          # 痛点图谱
+    topic_formulas: list[str] = field(default_factory=list)       # 选题公式模板
+    selection_criteria: list[str] = field(default_factory=list)   # 选题筛选标准
+    avoid_patterns: list[str] = field(default_factory=list)       # 选题禁区
+
+    def to_dict(self) -> dict:
+        return {
+            "angle_patterns": self.angle_patterns,
+            "pain_points": self.pain_points,
+            "topic_formulas": self.topic_formulas,
+            "selection_criteria": self.selection_criteria,
+            "avoid_patterns": self.avoid_patterns,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "TopicTechnique":
+        return cls(
+            angle_patterns=data.get("angle_patterns", []),
+            pain_points=data.get("pain_points", []),
+            topic_formulas=data.get("topic_formulas", []),
+            selection_criteria=data.get("selection_criteria", []),
+            avoid_patterns=data.get("avoid_patterns", []),
+        )
+
+
+@dataclass
+class HookAnalysis:
+    """黄金3秒钩子拆解"""
+    hook_text: str                                          # 原始文案
+    hook_type: HookType                                     # 钩子类型
+    psychological_mechanism: str                            # 心理机制
+    structural_formula: str                                 # 结构公式（可复用模板）
+    why_it_works: str                                       # 有效性分析
+    reconstruction_template: str                            # 可复用的重建模板
+    source_video_url: str = ""                              # 来源视频
+    persona_id: str = ""                                    # 关联人格
+    id: str = ""                                            # 记录 ID
+    created_at: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "hook_text": self.hook_text,
+            "hook_type": self.hook_type.value,
+            "psychological_mechanism": self.psychological_mechanism,
+            "structural_formula": self.structural_formula,
+            "why_it_works": self.why_it_works,
+            "reconstruction_template": self.reconstruction_template,
+            "source_video_url": self.source_video_url,
+            "persona_id": self.persona_id,
+            "created_at": self.created_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "HookAnalysis":
+        return cls(
+            id=data.get("id", ""),
+            hook_text=data.get("hook_text", ""),
+            hook_type=HookType(data.get("hook_type", "reverse_logic")),
+            psychological_mechanism=data.get("psychological_mechanism", ""),
+            structural_formula=data.get("structural_formula", ""),
+            why_it_works=data.get("why_it_works", ""),
+            reconstruction_template=data.get("reconstruction_template", ""),
+            source_video_url=data.get("source_video_url", ""),
+            persona_id=data.get("persona_id", ""),
+        )
+
+
+@dataclass
+class ContentStructureMap:
+    """内容结构映射（完整操控地图）"""
+    hook: HookAnalysis                                      # 钩子分析
+    credibility_build: str = ""                             # 信任建立段
+    pain_amplification: str = ""                            # 痛点放大段
+    information_density_curve: list[dict] = field(default_factory=list)  # 信息密度曲线
+    emotion_curve: list[dict] = field(default_factory=list)              # 情绪操控曲线
+    cta_pattern: str = ""                                   # CTA 收尾模式
+    closing_emotion: str = ""                               # 收尾情绪
+    id: str = ""                                            # 记录 ID
+    persona_id: str = ""                                    # 关联人格
+    source_video_url: str = ""                              # 来源视频
+    created_at: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "hook": self.hook.to_dict(),
+            "credibility_build": self.credibility_build,
+            "pain_amplification": self.pain_amplification,
+            "information_density_curve": self.information_density_curve,
+            "emotion_curve": self.emotion_curve,
+            "cta_pattern": self.cta_pattern,
+            "closing_emotion": self.closing_emotion,
+            "persona_id": self.persona_id,
+            "source_video_url": self.source_video_url,
+            "created_at": self.created_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ContentStructureMap":
+        hook_data = data.get("hook", {})
+        hook = HookAnalysis.from_dict(hook_data) if hook_data else HookAnalysis(hook_text="", hook_type=HookType.REVERSE_LOGIC, psychological_mechanism="", structural_formula="", why_it_works="", reconstruction_template="")
+        return cls(
+            id=data.get("id", ""),
+            hook=hook,
+            credibility_build=data.get("credibility_build", ""),
+            pain_amplification=data.get("pain_amplification", ""),
+            information_density_curve=data.get("information_density_curve", []),
+            emotion_curve=data.get("emotion_curve", []),
+            cta_pattern=data.get("cta_pattern", ""),
+            closing_emotion=data.get("closing_emotion", ""),
+            persona_id=data.get("persona_id", ""),
+            source_video_url=data.get("source_video_url", ""),
+        )
+
+
 @dataclass
 class PersonalityProfile:
     """人格画像 (扩充版)"""
@@ -103,6 +234,9 @@ class PersonalityProfile:
     logic_architecture: LogicArchitecture
     temporal_patterns: TemporalPattern
     deep_psychology: DeepPsychology = field(default_factory=DeepPsychology)  # 深度心理特征
+    topic_techniques: TopicTechnique | None = None            # 选题技法画像
+    hook_techniques: list[HookAnalysis] = field(default_factory=list)  # 钩子技法列表
+    structure_patterns: list[ContentStructureMap] = field(default_factory=list)  # 内容结构映射
     raw_json: dict = field(default_factory=dict)  # 原始 AI 输出（支持手动编辑）
     source_asr_texts: list[str] = field(default_factory=list)  # 原始 ASR 文本（12篇）
     created_at: datetime = field(default_factory=datetime.now)
@@ -133,6 +267,9 @@ class PersonalityProfile:
                 "rhetorical_devices": self.deep_psychology.rhetorical_devices,
                 "lexicon": self.deep_psychology.lexicon,
             },
+            "topic_techniques": self.topic_techniques.to_dict() if self.topic_techniques else None,
+            "hook_techniques": [h.to_dict() for h in self.hook_techniques],
+            "structure_patterns": [s.to_dict() for s in self.structure_patterns],
             "raw_json": self.raw_json,
             "source_asr_texts": self.source_asr_texts,
             "created_at": self.created_at.isoformat(),

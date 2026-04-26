@@ -184,6 +184,39 @@ def get_app():
         allow_headers=["*"],
     )
 
+    # API 限流中间件
+    from persona_engine.core.concurrency import concurrency_limiter
+    from starlette.middleware.base import BaseHTTPMiddleware
+    from starlette.requests import Request as StarletteRequest
+    from starlette.responses import JSONResponse as StarletteJSONResponse
+
+    class RateLimitMiddleware(BaseHTTPMiddleware):
+        """基于 IP 的 API 限流中间件（滑动窗口）"""
+
+        async def dispatch(self, request: StarletteRequest, call_next):
+            # 跳过健康检查和静态资源
+            if request.url.path in ("/v1/health", "/", "/favicon.ico"):
+                return await call_next(request)
+
+            # 获取客户端 IP
+            client_ip = request.client.host if request.client else "unknown"
+
+            # 检查限流
+            allowed = await concurrency_limiter.check_rate_limit(client_ip)
+            if not allowed:
+                return StarletteJSONResponse(
+                    status_code=429,
+                    content={
+                        "error": "TooManyRequests",
+                        "message": "请求过于频繁，请稍后再试",
+                        "code": "RATE_LIMIT_EXCEEDED",
+                    },
+                )
+
+            return await call_next(request)
+
+    app.add_middleware(RateLimitMiddleware)
+
     app.include_router(router, prefix="/v1")
 
     @app.exception_handler(PersonaEngineException)
@@ -236,6 +269,11 @@ def get_app():
             "registered_tasks": task_registry.list_tasks(),
             "timestamp": datetime.now().isoformat(),
         }
+
+    @app.get("/v1/debug/concurrency")
+    async def debug_concurrency():
+        """调试端点：查看并发控制状态"""
+        return concurrency_limiter.get_status()
 
     return app
 

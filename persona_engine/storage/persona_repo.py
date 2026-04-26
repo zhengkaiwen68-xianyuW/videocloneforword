@@ -6,6 +6,7 @@
 
 import json
 import logging
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -14,12 +15,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.exceptions import PersonaNotFoundError, DatabaseError, StorageError
 from ..core.types import (
+    ContentStructureMap,
     DeepPsychology,
+    HookAnalysis,
+    HookType,
     LogicArchitecture,
     PersonalityProfile,
     TemporalPattern,
+    TopicTechnique,
 )
-from .database import database, PersonaModel, VideoProcessingTaskModel
+from .database import (
+    ContentStructureModel,
+    HookAnalysisModel,
+    PersonaModel,
+    TopicTechniqueModel,
+    VideoProcessingTaskModel,
+    database,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -69,6 +81,9 @@ class PersonaRepository:
                     },
                     raw_json=profile.raw_json,
                     source_asr_texts=profile.source_asr_texts,
+                    topic_techniques=profile.topic_techniques.to_dict() if profile.topic_techniques else None,
+                    hook_techniques=[h.to_dict() for h in profile.hook_techniques],
+                    structure_patterns=[s.to_dict() for s in profile.structure_patterns],
                     created_at=profile.created_at,
                     updated_at=profile.updated_at,
                 )
@@ -353,6 +368,18 @@ class PersonaRepository:
             lexicon=deep_psy_data.get("lexicon", []),
         )
 
+        # 还原技法数据
+        topic_tech_data = model.topic_techniques
+        topic_techniques = TopicTechnique.from_dict(topic_tech_data) if topic_tech_data else None
+
+        hook_techniques = [
+            HookAnalysis.from_dict(h) for h in (model.hook_techniques or [])
+        ]
+
+        structure_patterns = [
+            ContentStructureMap.from_dict(s) for s in (model.structure_patterns or [])
+        ]
+
         return PersonalityProfile(
             id=model.id,
             name=model.name,
@@ -371,6 +398,9 @@ class PersonaRepository:
                 excitement_curve=temporal_data.get("excitement_curve", []),
             ),
             deep_psychology=deep_psychology,
+            topic_techniques=topic_techniques,
+            hook_techniques=hook_techniques,
+            structure_patterns=structure_patterns,
             raw_json=raw_json_data,
             source_asr_texts=model.source_asr_texts or [],
             created_at=model.created_at,
@@ -903,3 +933,306 @@ class VideoTaskRepository:
                 operation="get_by_persona",
                 details={"persona_id": persona_id},
             )
+
+
+class TechniqueRepository:
+    """
+    技法仓储
+
+    提供钩子分析、选题技法、内容结构映射的 CRUD 操作
+    """
+
+    def __init__(self):
+        self.db = database
+
+    # ── Hook Analysis ──
+
+    async def save_hook(self, hook: HookAnalysis) -> str:
+        """保存钩子分析记录"""
+        hook_id = hook.id or str(uuid.uuid4())
+        try:
+            async with self.db.session() as session:
+                model = HookAnalysisModel(
+                    id=hook_id,
+                    persona_id=hook.persona_id,
+                    hook_text=hook.hook_text,
+                    hook_type=hook.hook_type.value,
+                    psychological_mechanism=hook.psychological_mechanism,
+                    structural_formula=hook.structural_formula,
+                    why_it_works=hook.why_it_works,
+                    reconstruction_template=hook.reconstruction_template,
+                    source_video_url=hook.source_video_url,
+                    created_at=hook.created_at,
+                )
+                session.add(model)
+                await session.commit()
+            logger.info(f"Hook analysis saved: {hook_id}")
+            return hook_id
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to save hook analysis: {str(e)}",
+                operation="save_hook",
+            )
+
+    async def get_hooks_by_persona(self, persona_id: str) -> list[HookAnalysis]:
+        """获取指定人格的所有钩子分析"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(HookAnalysisModel)
+                    .where(HookAnalysisModel.persona_id == persona_id)
+                    .order_by(desc(HookAnalysisModel.created_at))
+                )
+                models = result.scalars().all()
+            return [self._model_to_hook(m) for m in models]
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get hooks by persona: {str(e)}",
+                operation="get_hooks_by_persona",
+            )
+
+    async def get_hooks_by_type(self, hook_type: str) -> list[HookAnalysis]:
+        """按钩子类型查询"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(HookAnalysisModel)
+                    .where(HookAnalysisModel.hook_type == hook_type)
+                    .order_by(desc(HookAnalysisModel.created_at))
+                )
+                models = result.scalars().all()
+            return [self._model_to_hook(m) for m in models]
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get hooks by type: {str(e)}",
+                operation="get_hooks_by_type",
+            )
+
+    async def search_hooks(self, query: str, limit: int = 10) -> list[HookAnalysis]:
+        """关键词搜索钩子分析"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(HookAnalysisModel)
+                    .where(
+                        HookAnalysisModel.hook_text.contains(query)
+                        | HookAnalysisModel.structural_formula.contains(query)
+                    )
+                    .order_by(desc(HookAnalysisModel.created_at))
+                    .limit(limit)
+                )
+                models = result.scalars().all()
+            return [self._model_to_hook(m) for m in models]
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to search hooks: {str(e)}",
+                operation="search_hooks",
+            )
+
+    async def get_hook_by_id(self, hook_id: str) -> HookAnalysis | None:
+        """按 ID 获取钩子分析"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(HookAnalysisModel).where(HookAnalysisModel.id == hook_id)
+                )
+                model = result.scalar_one_or_none()
+            return self._model_to_hook(model) if model else None
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get hook by id: {str(e)}",
+                operation="get_hook_by_id",
+            )
+
+    async def delete_hook(self, hook_id: str) -> bool:
+        """删除钩子分析"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    delete(HookAnalysisModel).where(HookAnalysisModel.id == hook_id)
+                )
+                await session.commit()
+            return result.rowcount > 0
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to delete hook: {str(e)}",
+                operation="delete_hook",
+            )
+
+    # ── Topic Technique ──
+
+    async def save_topic_technique(
+        self, technique: TopicTechnique, persona_id: str
+    ) -> str:
+        """保存选题技法（upsert：存在则更新）"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(TopicTechniqueModel)
+                    .where(TopicTechniqueModel.persona_id == persona_id)
+                )
+                existing = result.scalar_one_or_none()
+
+                if existing:
+                    existing.angle_patterns = technique.angle_patterns
+                    existing.pain_points = technique.pain_points
+                    existing.topic_formulas = technique.topic_formulas
+                    existing.selection_criteria = technique.selection_criteria
+                    existing.avoid_patterns = technique.avoid_patterns
+                    existing.updated_at = datetime.now()
+                    tech_id = existing.id
+                else:
+                    tech_id = str(uuid.uuid4())
+                    model = TopicTechniqueModel(
+                        id=tech_id,
+                        persona_id=persona_id,
+                        angle_patterns=technique.angle_patterns,
+                        pain_points=technique.pain_points,
+                        topic_formulas=technique.topic_formulas,
+                        selection_criteria=technique.selection_criteria,
+                        avoid_patterns=technique.avoid_patterns,
+                    )
+                    session.add(model)
+
+                await session.commit()
+            logger.info(f"Topic technique saved: {tech_id} for persona {persona_id}")
+            return tech_id
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to save topic technique: {str(e)}",
+                operation="save_topic_technique",
+            )
+
+    async def get_topic_technique(self, persona_id: str) -> TopicTechnique | None:
+        """获取指定人格的选题技法"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(TopicTechniqueModel)
+                    .where(TopicTechniqueModel.persona_id == persona_id)
+                )
+                model = result.scalar_one_or_none()
+            if not model:
+                return None
+            return TopicTechnique(
+                angle_patterns=model.angle_patterns or [],
+                pain_points=model.pain_points or [],
+                topic_formulas=model.topic_formulas or [],
+                selection_criteria=model.selection_criteria or [],
+                avoid_patterns=model.avoid_patterns or [],
+            )
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get topic technique: {str(e)}",
+                operation="get_topic_technique",
+            )
+
+    # ── Content Structure ──
+
+    async def save_content_structure(
+        self, structure: ContentStructureMap
+    ) -> str:
+        """保存内容结构映射"""
+        struct_id = structure.id or str(uuid.uuid4())
+        try:
+            async with self.db.session() as session:
+                model = ContentStructureModel(
+                    id=struct_id,
+                    persona_id=structure.persona_id,
+                    hook_id=structure.hook.id if structure.hook else None,
+                    hook_text=structure.hook.hook_text if structure.hook else "",
+                    hook_type=structure.hook.hook_type.value if structure.hook else "",
+                    credibility_build=structure.credibility_build,
+                    pain_amplification=structure.pain_amplification,
+                    information_density_curve=structure.information_density_curve,
+                    emotion_curve=structure.emotion_curve,
+                    cta_pattern=structure.cta_pattern,
+                    closing_emotion=structure.closing_emotion,
+                    source_video_url=structure.source_video_url,
+                    created_at=structure.created_at,
+                )
+                session.add(model)
+                await session.commit()
+            logger.info(f"Content structure saved: {struct_id}")
+            return struct_id
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to save content structure: {str(e)}",
+                operation="save_content_structure",
+            )
+
+    async def get_structures_by_persona(
+        self, persona_id: str
+    ) -> list[ContentStructureMap]:
+        """获取指定人格的所有内容结构映射"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    select(ContentStructureModel)
+                    .where(ContentStructureModel.persona_id == persona_id)
+                    .order_by(desc(ContentStructureModel.created_at))
+                )
+                models = result.scalars().all()
+            return [self._model_to_structure(m) for m in models]
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to get structures by persona: {str(e)}",
+                operation="get_structures_by_persona",
+            )
+
+    async def delete_structure(self, struct_id: str) -> bool:
+        """删除内容结构映射"""
+        try:
+            async with self.db.session() as session:
+                result = await session.execute(
+                    delete(ContentStructureModel)
+                    .where(ContentStructureModel.id == struct_id)
+                )
+                await session.commit()
+            return result.rowcount > 0
+        except Exception as e:
+            raise DatabaseError(
+                message=f"Failed to delete structure: {str(e)}",
+                operation="delete_structure",
+            )
+
+    # ── Model Converters ──
+
+    @staticmethod
+    def _model_to_hook(model: HookAnalysisModel) -> HookAnalysis:
+        return HookAnalysis(
+            id=model.id,
+            hook_text=model.hook_text,
+            hook_type=HookType(model.hook_type),
+            psychological_mechanism=model.psychological_mechanism,
+            structural_formula=model.structural_formula,
+            why_it_works=model.why_it_works,
+            reconstruction_template=model.reconstruction_template,
+            source_video_url=model.source_video_url,
+            persona_id=model.persona_id,
+            created_at=model.created_at,
+        )
+
+    @staticmethod
+    def _model_to_structure(model: ContentStructureModel) -> ContentStructureMap:
+        hook = HookAnalysis(
+            hook_text=model.hook_text or "",
+            hook_type=HookType(model.hook_type) if model.hook_type else HookType.REVERSE_LOGIC,
+            psychological_mechanism="",
+            structural_formula="",
+            why_it_works="",
+            reconstruction_template="",
+        )
+        return ContentStructureMap(
+            id=model.id,
+            hook=hook,
+            credibility_build=model.credibility_build,
+            pain_amplification=model.pain_amplification,
+            information_density_curve=model.information_density_curve or [],
+            emotion_curve=model.emotion_curve or [],
+            cta_pattern=model.cta_pattern,
+            closing_emotion=model.closing_emotion,
+            persona_id=model.persona_id,
+            source_video_url=model.source_video_url,
+            created_at=model.created_at,
+        )

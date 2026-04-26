@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from ..core.config import config
-from ..core.types import PersonalityProfile
+from ..core.types import HookAnalysis, HookType, PersonalityProfile, TopicTechnique
 from ..core.exceptions import ConsistencyScoreError
 from .reverse_agent import ReverseAgent
 
@@ -384,6 +384,119 @@ class ConsistencyScorer:
             "original_rhythm": profile.temporal_patterns.speech_rhythm,
             "original_pause_freq": profile.temporal_patterns.pause_frequency,
         }
+
+    def _score_hook_technique(
+        self,
+        hook_text: str,
+        target_technique: HookAnalysis,
+    ) -> dict[str, Any]:
+        """
+        评估重写文案的钩子是否使用了目标技法
+
+        评分维度：
+        1. 技法类型匹配度
+        2. 结构公式一致性
+        3. 心理机制是否触发
+
+        Args:
+            hook_text: 待评估的钩子文案
+            target_technique: 目标钩子技法
+
+        Returns:
+            {"score": float, "details": dict}
+        """
+        if not target_technique or not hook_text:
+            return {"score": 100.0, "details": {"reason": "无目标技法，默认通过"}}
+
+        scores = []
+        details = {}
+
+        # 1. 技法类型匹配（简单关键词检测）
+        type_score = self._check_hook_type_match(hook_text, target_technique.hook_type)
+        scores.append(type_score)
+        details["type_match"] = type_score
+
+        # 2. 结构公式一致性（检查是否包含公式中的关键词）
+        formula = target_technique.structural_formula
+        if formula:
+            # 提取公式中的非变量部分
+            formula_keywords = [
+                w for w in formula.replace("{", "").replace("}", "").split()
+                if len(w) >= 2 and w not in {"的", "了", "是", "在", "和"}
+            ]
+            if formula_keywords:
+                matched = sum(1 for kw in formula_keywords if kw in hook_text)
+                formula_score = min(100.0, matched / len(formula_keywords) * 100)
+            else:
+                formula_score = 80.0
+            scores.append(formula_score)
+            details["formula_match"] = formula_score
+
+        total = sum(scores) / len(scores) if scores else 100.0
+        return {"score": round(total, 2), "details": details}
+
+    def _score_topic_alignment(
+        self,
+        hook_text: str,
+        topic_technique: TopicTechnique,
+    ) -> dict[str, Any]:
+        """
+        评估钩子的选题切入角度是否符合目标技法
+
+        Args:
+            hook_text: 待评估的钩子文案
+            topic_technique: 目标选题技法
+
+        Returns:
+            {"score": float, "details": dict}
+        """
+        if not topic_technique or not hook_text:
+            return {"score": 100.0, "details": {"reason": "无目标选题技法，默认通过"}}
+
+        hook_lower = hook_text.lower()
+
+        # 检查痛点匹配
+        pain_hits = 0
+        for pain in topic_technique.pain_points:
+            if pain.lower() in hook_lower:
+                pain_hits += 1
+
+        # 检查角度匹配
+        angle_hits = 0
+        for angle in topic_technique.angle_patterns:
+            angle_keywords = angle.replace("/", " ").replace("、", " ").split()
+            if any(kw.lower() in hook_lower for kw in angle_keywords):
+                angle_hits += 1
+
+        pain_score = min(100.0, pain_hits * 50) if topic_technique.pain_points else 80.0
+        angle_score = min(100.0, angle_hits * 50) if topic_technique.angle_patterns else 80.0
+
+        total = pain_score * 0.5 + angle_score * 0.5
+        return {"score": round(total, 2), "details": {"pain_hits": pain_hits, "angle_hits": angle_hits}}
+
+    @staticmethod
+    def _check_hook_type_match(hook_text: str, target_type: HookType) -> float:
+        """检查钩子是否符合目标类型（规则检测）"""
+        text = hook_text.strip()
+
+        type_indicators = {
+            HookType.REVERSE_LOGIC: ["不是", "根本", "其实", "从来没", "别再"],
+            HookType.PAIN_POINT: ["还在", "你是不是", "有没有", "是不是也"],
+            HookType.BENEFIT_BOMB: ["秒", "分钟", "一步", "只需", "搞定"],
+            HookType.SUSPENSE_CUTOFF: ["因为", "但是", "后来", "结果"],
+            HookType.AUTHORITY_SUBVERT: ["专家", "教授", "巴菲特", "大佬"],
+            HookType.DATA_IMPACT: ["%", "万", "亿", "倍", "差距"],
+            HookType.IDENTITY_LABEL: ["如果你也", "你是", "这类人", "像你这样"],
+        }
+
+        indicators = type_indicators.get(target_type, [])
+        if not indicators:
+            return 80.0
+
+        matches = sum(1 for ind in indicators if ind in text)
+        if matches >= 1:
+            return 100.0
+        return 50.0  # 无法确认但也不一定错
 
     def _score_golden_hook(self, text: str) -> dict[str, Any]:
         """

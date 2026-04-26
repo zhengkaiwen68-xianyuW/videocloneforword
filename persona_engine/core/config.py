@@ -1,5 +1,7 @@
 """
 配置管理 - 短视频人格深度重构与洗稿引擎
+
+优先级：环境变量 > .env 文件 > config.yaml 默认值
 """
 
 import os
@@ -8,6 +10,18 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from dotenv import load_dotenv
+
+# 加载 .env 文件（项目根目录）
+_env_paths = [
+    Path(".env"),
+    Path(__file__).parent.parent.parent / ".env",
+    Path(__file__).parent.parent.parent.parent / ".env",
+]
+for _p in _env_paths:
+    if _p.exists():
+        load_dotenv(_p, override=False)
+        break
 
 
 @dataclass
@@ -51,6 +65,28 @@ class AuditConfig:
     grammar_weight: float = 0.20
     term_preservation_weight: float = 0.30
     rhythm_weight: float = 0.42
+
+
+@dataclass
+class ConcurrencyConfig:
+    """并发控制配置"""
+    max_concurrent_tasks: int = 3       # 最大同时运行的视频处理任务数
+    max_concurrent_llm: int = 5         # 最大同时运行的 LLM API 调用数
+    max_concurrent_downloads: int = 2   # 最大同时进行的B站下载数
+    api_rate_limit: int = 60            # API 限流：每分钟最大请求数（per IP）
+    api_rate_window: int = 60           # 限流窗口（秒）
+    queue_max_size: int = 50            # 等待队列最大长度
+
+
+@dataclass
+class RAGConfig:
+    """RAG 向量检索配置"""
+    enabled: bool = True
+    chroma_path: str = "./data/chroma_db"       # ChromaDB 持久化路径
+    collection_name: str = "persona_corpus"     # 集合名称
+    embedding_model: str = "all-MiniLM-L6-v2"   # 嵌入模型
+    top_k: int = 5                              # 检索数量
+    similarity_threshold: float = 0.6           # 相似度阈值
 
 
 @dataclass
@@ -137,17 +173,23 @@ class Config:
         return None
 
     @property
+    def llm_provider(self) -> str:
+        """LLM 供应商名称（环境变量优先）"""
+        cfg = self._config.get("llm", {})
+        return os.getenv("LLM_PROVIDER") or cfg.get("provider", "minimax")
+
+    @property
     def minimax(self) -> MiniMaxConfig:
-        """MiniMax API 配置"""
+        """MiniMax API 配置（环境变量优先）"""
         cfg = self._config.get("minimax", {})
-        api_key = cfg.get("api_key", os.getenv("MINIMAX_API_KEY", ""))
+        api_key = os.getenv("MINIMAX_API_KEY") or cfg.get("api_key", "")
         if not api_key:
-            raise ValueError("MiniMax API key not configured")
+            raise ValueError("MiniMax API key not configured (set MINIMAX_API_KEY env var or config.yaml)")
         return MiniMaxConfig(
             api_key=api_key,
-            base_url=cfg.get("base_url", "https://api.minimax.chat/v1"),
-            model=cfg.get("model", "MiniMax-M2.7"),
-            timeout=cfg.get("timeout", 60),
+            base_url=os.getenv("MINIMAX_BASE_URL") or cfg.get("base_url", "https://api.minimax.chat/v1"),
+            model=os.getenv("MINIMAX_MODEL") or cfg.get("model", "MiniMax-M2.7"),
+            timeout=int(os.getenv("MINIMAX_TIMEOUT", "0")) or cfg.get("timeout", 60),
         )
 
     @property
@@ -190,14 +232,14 @@ class Config:
     @property
     def bilibili(self) -> BilibiliConfig:
         """
-        B站下载配置
+        B站下载配置（环境变量优先）
 
         参考BBDown设计: https://github.com/nilaoda/BBDown
         """
         cfg = self._config.get("bilibili", {})
         return BilibiliConfig(
-            cookie=cfg.get("cookie", ""),
-            access_token=cfg.get("access_token", ""),
+            cookie=os.getenv("BILIBILI_COOKIE") or cfg.get("cookie", ""),
+            access_token=os.getenv("BILIBILI_ACCESS_TOKEN") or cfg.get("access_token", ""),
             min_interval=cfg.get("min_interval", 3.0),
             max_interval=cfg.get("max_interval", 10.0),
             delay_per_page=cfg.get("delay_per_page", 5.0),
@@ -205,6 +247,32 @@ class Config:
             retry_base_delay=cfg.get("retry_base_delay", 2.0),
             user_agent=cfg.get("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
             api_mode=cfg.get("api_mode", "web"),
+        )
+
+    @property
+    def concurrency(self) -> ConcurrencyConfig:
+        """并发控制配置"""
+        cfg = self._config.get("concurrency", {})
+        return ConcurrencyConfig(
+            max_concurrent_tasks=int(os.getenv("MAX_CONCURRENT_TASKS", "0")) or cfg.get("max_concurrent_tasks", 3),
+            max_concurrent_llm=int(os.getenv("MAX_CONCURRENT_LLM", "0")) or cfg.get("max_concurrent_llm", 5),
+            max_concurrent_downloads=int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "0")) or cfg.get("max_concurrent_downloads", 2),
+            api_rate_limit=int(os.getenv("API_RATE_LIMIT", "0")) or cfg.get("api_rate_limit", 60),
+            api_rate_window=int(os.getenv("API_RATE_WINDOW", "0")) or cfg.get("api_rate_window", 60),
+            queue_max_size=int(os.getenv("QUEUE_MAX_SIZE", "0")) or cfg.get("queue_max_size", 50),
+        )
+
+    @property
+    def rag(self) -> RAGConfig:
+        """RAG 向量检索配置"""
+        cfg = self._config.get("rag", {})
+        return RAGConfig(
+            enabled=cfg.get("enabled", True),
+            chroma_path=os.getenv("RAG_CHROMA_PATH") or cfg.get("chroma_path", "./data/chroma_db"),
+            collection_name=cfg.get("collection_name", "persona_corpus"),
+            embedding_model=cfg.get("embedding_model", "all-MiniLM-L6-v2"),
+            top_k=int(os.getenv("RAG_TOP_K", "0")) or cfg.get("top_k", 5),
+            similarity_threshold=float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0")) or cfg.get("similarity_threshold", 0.6),
         )
 
     @property

@@ -11,10 +11,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from ..core.types import PersonalityProfile
+from ..core.types import (
+    ContentStructureMap,
+    HookAnalysis,
+    PersonalityProfile,
+    TopicTechnique,
+)
 from ..core.exceptions import PersonaInjectionError
-from .minimax_adapter import MiniMaxAdapter
+from ..llm.minimax import MiniMaxAdapter
 from .term_lock import TermLock, TermLockResult
+
+
+def _get_rag_retriever():
+    """懒加载 RAG 检索器"""
+    try:
+        from ..core.config import config
+        if config.rag.enabled:
+            from ..rag.retriever import RAGRetriever
+            return RAGRetriever(config.rag)
+    except Exception as e:
+        logger.warning(f"RAG 检索器初始化失败: {e}")
+    return None
 
 
 class PersonaInjector:
@@ -48,6 +65,9 @@ class PersonaInjector:
         persona_profile: PersonalityProfile,
         locked_terms: list[str] | None = None,
         include_pauses: bool = True,
+        target_hook_type: str | None = None,
+        topic_technique: TopicTechnique | None = None,
+        structure_map: ContentStructureMap | None = None,
     ) -> dict[str, Any]:
         """
         执行人格注入重写（编导+演员双轨架构）
@@ -58,11 +78,16 @@ class PersonaInjector:
         3. 阶段二（演员）：续写正文
         4. 物理拼接 + 术语恢复
 
+        当提供技法参数时，使用「技法驱动 + 风格驱动」双轨模式。
+
         Args:
             source_text: 原始素材文本
             persona_profile: 人格画像
             locked_terms: 额外需要保护的术语
             include_pauses: 是否注入停顿标记
+            target_hook_type: 指定钩子类型（可选）
+            topic_technique: 选题技法（可选）
+            structure_map: 内容结构映射（可选）
 
         Returns:
             {
@@ -113,6 +138,18 @@ class PersonaInjector:
                     previous_feedback=hook_feedback,
                 )
 
+                # 如果指定了钩子类型，验证生成结果是否匹配
+                if target_hook_type and attempt < max_hook_retries - 1:
+                    generated_hook = hook_result.get("golden_hook", "")
+                    if not self._hook_type_matches(generated_hook, target_hook_type):
+                        hook_feedback = (
+                            f"你刚才生成的句子是『{generated_hook}』。"
+                            f"被拒原因：钩子类型不匹配，要求 {target_hook_type} 类型，但生成的不符合。"
+                            f"请换用 {target_hook_type} 策略重新生成！"
+                        )
+                        logger.warning(f"Hook 类型不匹配 (第 {attempt + 1} 次): {hook_feedback}")
+                        continue
+
                 candidate_hook = hook_result.get("golden_hook", "")
                 score_result = scorer._score_golden_hook(candidate_hook)
 
@@ -155,20 +192,59 @@ class PersonaInjector:
             # Step 3: 演员上场 -> 续写正文 (带语义打分与反思环，最高重试3次)
             persona_prompt_dict = self._build_persona_prompt(persona_profile)
 
+            # RAG 检索：查找相似的真实语料作为 few-shot 示例
+            few_shot_examples = None
+            rag_retriever = _get_rag_retriever()
+            if rag_retriever:
+                rag_results = rag_retriever.retrieve_similar(
+                    query_text=protected_text,
+                    persona_id=persona_profile.id,
+                    top_k=3,
+                )
+                if rag_results:
+                    # 转换为 build_body_rewrite_prompt 期望的格式
+                    few_shot_examples = [
+                        {"content": r["document"]}
+                        for r in rag_results
+                    ]
+                    logger.info(f"RAG 检索到 {len(few_shot_examples)} 条相似语料，将作为 few-shot 示例")
+
             max_body_retries = 3
             body_feedback = None
             rewritten_body = ""
             body_res_data = {}
 
             for body_attempt in range(max_body_retries):
-                body_prompt = self.llm_adapter.build_body_rewrite_prompt(
-                    source_text=protected_text,
-                    golden_hook=golden_hook,
-                    persona_profile=persona_prompt_dict,
-                    protected_terms=all_locked_terms,
-                    few_shot_examples=None,  # 此处预留给后续数据库 RAG 查询传入真实文本
-                    previous_feedback=body_feedback,
-                )
+                # 技法驱动模式：使用 prompt_library 的双轨模板
+                if topic_technique or structure_map:
+                    from ..technique.prompt_library import build_technique_driven_rewrite_prompt
+                    from ..core.types import HookAnalysis, HookType
+
+                    hook_analysis = HookAnalysis(
+                        hook_text=golden_hook,
+                        hook_type=HookType(target_hook_type) if target_hook_type else HookType.REVERSE_LOGIC,
+                        psychological_mechanism="",
+                        structural_formula="",
+                        why_it_works="",
+                        reconstruction_template="",
+                    )
+                    body_prompt = build_technique_driven_rewrite_prompt(
+                        source_text=protected_text,
+                        hook_analysis=hook_analysis,
+                        persona=persona_profile,
+                        topic_technique=topic_technique,
+                        structure_map=structure_map,
+                        few_shot_examples=few_shot_examples,
+                    )
+                else:
+                    body_prompt = self.llm_adapter.build_body_rewrite_prompt(
+                        source_text=protected_text,
+                        golden_hook=golden_hook,
+                        persona_profile=persona_prompt_dict,
+                        protected_terms=all_locked_terms,
+                        few_shot_examples=few_shot_examples,
+                        previous_feedback=body_feedback,
+                    )
 
                 body_res = await self.llm_adapter.generate_json(
                     prompt=body_prompt,
@@ -297,6 +373,28 @@ class PersonaInjector:
         )
 
         return "\n".join(instructions)
+
+    @staticmethod
+    def _hook_type_matches(hook_text: str, target_type: str) -> bool:
+        """
+        简单规则校验钩子类型是否匹配（轻量级，不调用 LLM）
+
+        用于快速过滤明显不匹配的钩子。
+        """
+        text = hook_text.strip()
+
+        type_indicators = {
+            "reverse_logic": ["不是", "根本", "其实", "从来没", "别再"],
+            "pain_point": ["还在", "你是不是", "有没有", "是不是也"],
+            "benefit_bomb": ["秒", "分钟", "一步", "只需", "搞定"],
+            "suspense_cutoff": ["因为", "但是", "后来", "结果"],
+            "authority_subvert": ["专家", "教授", "巴菲特", "大佬"],
+            "data_impact": ["%", "万", "亿", "倍", "差距"],
+            "identity_label": ["如果你也", "你是", "这类人", "像你这样"],
+        }
+
+        indicators = type_indicators.get(target_type, [])
+        return any(ind in text for ind in indicators)
 
     def _get_safe_fallback_hook(self, source_text: str) -> str:
         """

@@ -13,7 +13,7 @@ from typing import AsyncGenerator
 from sqlalchemy import text, event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import NullPool
+from sqlalchemy.pool import StaticPool
 
 from ..core.config import config
 from ..core.exceptions import DatabaseError
@@ -61,8 +61,10 @@ class Database:
 
         database_url = f"sqlite+aiosqlite:///{db_path}"
 
-        # 使用 NullPool 替代 StaticPool，让 aiosqlite 自行管理连接池
-        # 这样每次连接时都会执行 PRAGMA 设置（WAL 模式在每个新连接上都需要设置）
+        # 使用 StaticPool 保持单个连接常驻，避免频繁创建/销毁连接
+        # SQLite 本质是单写者模型，StaticPool + WAL 模式是最佳组合：
+        # - StaticPool: 连接复用，减少开销
+        # - WAL: 支持并发读写（读不阻塞写，写不阻塞读）
         self._engine = create_async_engine(
             database_url,
             echo=db_config.echo,
@@ -70,7 +72,7 @@ class Database:
             connect_args={
                 "timeout": 30,  # 等待 30 秒而不是立刻抛出 database is locked
             },
-            poolclass=NullPool,
+            poolclass=StaticPool,
         )
 
         # 强制开启 WAL 模式 (Write-Ahead Logging) 以支持并发读写
@@ -200,6 +202,9 @@ class PersonaModel(Base):
     temporal_patterns: Mapped[dict] = mapped_column(JSON, default=dict)
     raw_json: Mapped[dict] = mapped_column(JSON, default=dict)
     source_asr_texts: Mapped[list] = mapped_column(JSON, default=list)
+    topic_techniques: Mapped[dict] = mapped_column(JSON, nullable=True)
+    hook_techniques: Mapped[list] = mapped_column(JSON, default=list)
+    structure_patterns: Mapped[list] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now
@@ -245,3 +250,55 @@ class VideoProcessingTaskModel(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.now, onupdate=datetime.now
     )
+
+
+class HookAnalysisModel(Base):
+    """黄金3秒钩子拆解表"""
+    __tablename__ = "hook_analyses"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    hook_text: Mapped[str] = mapped_column(Text, nullable=False)
+    hook_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    psychological_mechanism: Mapped[str] = mapped_column(Text, default="")
+    structural_formula: Mapped[str] = mapped_column(Text, default="")
+    why_it_works: Mapped[str] = mapped_column(Text, default="")
+    reconstruction_template: Mapped[str] = mapped_column(Text, default="")
+    source_video_url: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class TopicTechniqueModel(Base):
+    """选题技法画像表"""
+    __tablename__ = "topic_techniques"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True, unique=True)
+    angle_patterns: Mapped[list] = mapped_column(JSON, default=list)
+    pain_points: Mapped[list] = mapped_column(JSON, default=list)
+    topic_formulas: Mapped[list] = mapped_column(JSON, default=list)
+    selection_criteria: Mapped[list] = mapped_column(JSON, default=list)
+    avoid_patterns: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.now, onupdate=datetime.now
+    )
+
+
+class ContentStructureModel(Base):
+    """内容结构映射表"""
+    __tablename__ = "content_structures"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    persona_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    hook_id: Mapped[str] = mapped_column(String(36), nullable=True)
+    hook_text: Mapped[str] = mapped_column(Text, default="")
+    hook_type: Mapped[str] = mapped_column(String(50), default="")
+    credibility_build: Mapped[str] = mapped_column(Text, default="")
+    pain_amplification: Mapped[str] = mapped_column(Text, default="")
+    information_density_curve: Mapped[list] = mapped_column(JSON, default=list)
+    emotion_curve: Mapped[list] = mapped_column(JSON, default=list)
+    cta_pattern: Mapped[str] = mapped_column(Text, default="")
+    closing_emotion: Mapped[str] = mapped_column(Text, default="")
+    source_video_url: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
