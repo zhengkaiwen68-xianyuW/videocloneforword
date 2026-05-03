@@ -70,7 +70,7 @@
     <el-dialog v-model="showAddVideo" title="添加视频" width="500">
       <el-form label-width="80px">
         <el-form-item label="视频URL" required>
-          <el-input v-model="newVideoUrl" placeholder="输入B站视频URL" />
+          <el-input v-model="newVideoUrl" type="textarea" :rows="3" placeholder="输入B站视频URL，一行一个" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -132,7 +132,11 @@ const handleAddVideo = async () => {
   addingVideo.value = true
   try {
     const id = route.params.id as string
-    await personaApi.addVideo(id, { url: newVideoUrl.value })
+    const videoUrls = newVideoUrl.value
+      .split(/\r?\n/)
+      .map(url => url.trim())
+      .filter(Boolean)
+    await personaApi.addVideo(id, { video_urls: videoUrls })
     ElMessage.success('添加成功')
     showAddVideo.value = false
     newVideoUrl.value = ''

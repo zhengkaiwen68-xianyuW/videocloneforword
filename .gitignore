@@ -16,6 +16,8 @@ SOURCE_CODE.md
 # Environment variables (contains secrets)
 .env
 .env.local
+.venv/
+.pycache/
 
 # Data directory (ChromaDB, etc.)
 data/

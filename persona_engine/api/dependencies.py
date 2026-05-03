@@ -10,7 +10,7 @@ import logging
 from persona_engine.core.task_registry import task_registry
 from persona_engine.core.concurrency import concurrency_limiter
 from persona_engine.storage.persona_repo import PersonaRepository, TaskRepository, VideoTaskRepository
-from persona_engine.asr.transcriber import WhisperTranscriber
+from persona_engine.core.exceptions import TranscriptionError
 
 logger = logging.getLogger(__name__)
 
@@ -19,9 +19,32 @@ persona_repo = PersonaRepository()
 task_repo = TaskRepository()
 video_task_repo = VideoTaskRepository()
 
+class LazyWhisperTranscriber:
+    """按需加载 Whisper 转写器，避免非 ASR 路由被重依赖阻塞。"""
+
+    def __init__(self):
+        self._instance = None
+
+    def _get_instance(self):
+        if self._instance is None:
+            try:
+                from persona_engine.asr.transcriber import WhisperTranscriber
+            except ModuleNotFoundError as e:
+                if e.name == "faster_whisper":
+                    raise TranscriptionError(
+                        "ASR dependency faster-whisper is not installed. "
+                        "Install requirements.txt and ensure FFmpeg/libav development libraries are available."
+                    ) from e
+                raise
+            self._instance = WhisperTranscriber()
+        return self._instance
+
+    async def transcribe_async(self, *args, **kwargs):
+        return await self._get_instance().transcribe_async(*args, **kwargs)
+
+
 # ── 服务单例 ──
-# WhisperTranscriber 实例本身轻量；模型常驻 WhisperWorker 子进程，懒加载
-_transcriber = WhisperTranscriber()
+_transcriber = LazyWhisperTranscriber()
 
 # ── 并发控制 ──
 concurrency = concurrency_limiter

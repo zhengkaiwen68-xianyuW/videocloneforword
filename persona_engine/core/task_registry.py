@@ -43,12 +43,15 @@ class TaskRegistry:
 
     def unregister(self, task_id: str):
         """任务完成后移除"""
-        if task_id in self._tasks:
-            del self._tasks[task_id]
+        removed = self._tasks.pop(task_id, None)
+        if removed is None:
+            logger.debug(f"Task already unregistered: {task_id} (remaining: {len(self._tasks)})")
+            return
+
         # 清除该任务的 generation 信息
         self._task_generation.pop(task_id, None)
-        # 注意：不修改 _cancelled_generation，因为它可能被其他任务引用
-        # 新任务注册时会通过 register() 重新建立正确的 generation 关系
+        # 任务完成后取消标志也不再有意义；新任务注册时会创建新的 generation
+        self._cancelled_generation.pop(task_id, None)
         logger.info(f"Task unregistered: {task_id} (remaining: {len(self._tasks)})")
 
     def get(self, task_id: str) -> asyncio.Task | None:
@@ -103,8 +106,6 @@ class TaskRegistry:
             if task_id in self._task_generation:
                 self._cancelled_generation[task_id] = self._task_generation[task_id]
             logger.info(f"Task cancellation requested: {task_id}")
-        self._tasks.clear()
-        # 保留 generations 以便追踪（但任务已清空）
 
     async def wait_all(self, timeout: float = 5.0):
         """等待所有任务完成（带超时）"""
@@ -112,12 +113,23 @@ class TaskRegistry:
             return
         pending = [t for t in self._tasks.values() if not t.done()]
         if not pending:
+            self._prune_finished_tasks()
             return
         logger.info(f"Waiting for {len(pending)} tasks to complete...")
-        done, pending = await asyncio.wait(pending, timeout=timeout)
-        for task in pending:
+        _, still_pending = await asyncio.wait(pending, timeout=timeout)
+        for task in still_pending:
             task.cancel()
-        self._tasks.clear()
+        self._prune_finished_tasks()
+
+    def _prune_finished_tasks(self):
+        """移除已完成或已取消的任务引用，避免注册表保留陈旧 task。"""
+        finished_ids = [
+            task_id
+            for task_id, task in self._tasks.items()
+            if task.done() or task.cancelled()
+        ]
+        for task_id in finished_ids:
+            self.unregister(task_id)
 
     def list_tasks(self) -> list[str]:
         """列出所有任务ID"""

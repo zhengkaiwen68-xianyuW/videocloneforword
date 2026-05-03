@@ -40,30 +40,16 @@
       </el-form-item>
     </el-form>
 
-    <!-- 重写结果 -->
+    <!-- 重写任务 -->
     <div v-if="result" class="result-section">
-      <h3>重写结果</h3>
-      <el-card>
-        <div class="result-text">{{ result.rewritten_text }}</div>
-      </el-card>
-
-      <div v-if="result.score" class="score-section">
-        <h4>评分</h4>
-        <el-descriptions :column="2" border>
-          <el-descriptions-item label="总体评分">
-            <el-rate v-model="result.score.overall" disabled :max="10" />
-          </el-descriptions-item>
-          <el-descriptions-item label="钩子匹配度">
-            <el-progress :percentage="result.score.hook_match || 0" />
-          </el-descriptions-item>
-          <el-descriptions-item label="人格一致性">
-            <el-progress :percentage="result.score.persona_consistency || 0" />
-          </el-descriptions-item>
-          <el-descriptions-item label="选题契合度">
-            <el-progress :percentage="result.score.topic_alignment || 0" />
-          </el-descriptions-item>
-        </el-descriptions>
-      </div>
+      <h3>重写任务</h3>
+      <el-descriptions :column="1" border>
+        <el-descriptions-item label="批次ID">{{ result.batch_id }}</el-descriptions-item>
+        <el-descriptions-item label="任务数量">{{ result.total_count }}</el-descriptions-item>
+        <el-descriptions-item label="任务ID">
+          <el-tag v-for="id in result.task_ids" :key="id" class="task-tag">{{ id }}</el-tag>
+        </el-descriptions-item>
+      </el-descriptions>
     </div>
   </div>
 </template>
@@ -110,13 +96,14 @@ const handleRewrite = async () => {
   loading.value = true
   try {
     const { data } = await rewriteApi.batchProcess({
-      persona_id: form.value.persona_id,
-      texts: [form.value.original_text],
-      hook_type: form.value.hook_type || undefined,
-      topic_technique: form.value.topic_technique || undefined
+      source_texts: [form.value.original_text.trim()],
+      persona_ids: [form.value.persona_id],
+      locked_terms: [],
+      max_iterations: 5,
+      timeout_seconds: 300
     })
-    result.value = data.results?.[0] || data
-    ElMessage.success('重写完成')
+    result.value = data
+    ElMessage.success('重写任务已创建')
   } catch (e: any) {
     ElMessage.error('重写失败: ' + (e.message || '未知错误'))
   } finally {
@@ -160,19 +147,7 @@ h2 {
   color: #303133;
 }
 
-.result-text {
-  font-size: 16px;
-  line-height: 1.8;
-  color: #606266;
-  white-space: pre-wrap;
-}
-
-.score-section {
-  margin-top: 20px;
-}
-
-.score-section h4 {
-  margin-bottom: 12px;
-  color: #303133;
+.task-tag {
+  margin-right: 8px;
 }
 </style>

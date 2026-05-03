@@ -37,11 +37,11 @@
         <el-form-item label="名称" required>
           <el-input v-model="createForm.name" placeholder="输入人格名称" />
         </el-form-item>
-        <el-form-item label="描述">
-          <el-input v-model="createForm.description" type="textarea" :rows="3" placeholder="输入人格描述" />
+        <el-form-item label="ASR文本">
+          <el-input v-model="createForm.source_text" type="textarea" :rows="4" placeholder="输入已转写文本（与视频URL二选一）" />
         </el-form-item>
         <el-form-item label="视频URL">
-          <el-input v-model="createForm.video_url" placeholder="输入B站视频URL（可选）" />
+          <el-input v-model="createForm.video_urls_text" type="textarea" :rows="3" placeholder="输入B站视频URL，一行一个（可选）" />
         </el-form-item>
       </el-form>
       <template #footer>
@@ -66,8 +66,8 @@ const showCreateDialog = ref(false)
 const creating = ref(false)
 const createForm = ref({
   name: '',
-  description: '',
-  video_url: ''
+  source_text: '',
+  video_urls_text: ''
 })
 
 const formatDate = (date: string) => {
@@ -106,12 +106,29 @@ const handleCreate = async () => {
     ElMessage.warning('请输入人格名称')
     return
   }
+  const sourceTexts = createForm.value.source_text.trim()
+    ? [createForm.value.source_text.trim()]
+    : []
+  const videoUrls = createForm.value.video_urls_text
+    .split(/\r?\n/)
+    .map(url => url.trim())
+    .filter(Boolean)
+
+  if (sourceTexts.length === 0 && videoUrls.length === 0) {
+    ElMessage.warning('请输入ASR文本或视频URL')
+    return
+  }
+
   creating.value = true
   try {
-    await personaApi.create(createForm.value)
+    await personaApi.create({
+      name: createForm.value.name.trim(),
+      source_texts: sourceTexts.length ? sourceTexts : undefined,
+      video_urls: videoUrls.length ? videoUrls : undefined
+    })
     ElMessage.success('创建成功')
     showCreateDialog.value = false
-    createForm.value = { name: '', description: '', video_url: '' }
+    createForm.value = { name: '', source_text: '', video_urls_text: '' }
     loadPersonas()
   } catch (e: any) {
     ElMessage.error('创建失败: ' + (e.message || '未知错误'))
