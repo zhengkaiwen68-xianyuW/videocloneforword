@@ -369,7 +369,7 @@ class PersonaInjector:
         temp = profile.temporal_patterns
         instructions.append(
             f"节奏控制：{temp.speech_rhythm}节奏，"
-            f"每分钟约{temp.pause_frequency:.0f}次停顿"
+            f"每分钟约{temp.pause_frequency}次停顿"
         )
 
         return "\n".join(instructions)

@@ -714,8 +714,14 @@ async def run_persona_from_videos_task(
             logger.error(f"Task {task_id}: No successful transcriptions")
             return
 
-        # 使用人格提取器生成画像
-        extractor = PersonalityExtractor()
+        # 使用人格提取器生成画像（调用 LLM 分析）
+        from persona_engine.llm.factory import create_llm_provider
+        try:
+            llm_adapter = create_llm_provider()
+        except Exception as e:
+            logger.warning(f"Failed to create LLM provider for personality extraction: {e}, using fallback")
+            llm_adapter = None
+        extractor = PersonalityExtractor(llm_adapter=llm_adapter)
         # 获取原有人格的名称（用于保持名称不变）
         existing_persona = await persona_repo.get_by_id(persona_id)
         original_name = existing_persona.name if existing_persona else None
@@ -889,7 +895,12 @@ async def run_persona_upgrade_task(
             return
 
         # 重新计算人格画像
-        extractor = PersonalityExtractor()
+        try:
+            llm_adapter = create_llm_provider()
+        except Exception as e:
+            logger.warning(f"Failed to create LLM provider for upgrade: {e}, using fallback")
+            llm_adapter = None
+        extractor = PersonalityExtractor(llm_adapter=llm_adapter)
         profile = await extractor.extract(
             texts=all_texts,
             author_name=existing_persona.name,

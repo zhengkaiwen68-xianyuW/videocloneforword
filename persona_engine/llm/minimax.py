@@ -188,24 +188,34 @@ class MiniMaxAdapter:
         prompt: str,
         system_prompt: str | None = None,
         temperature: float = 0.3,
+        max_retries: int = 3,
     ) -> dict[str, Any]:
-        """调用 MiniMax API 并强制 JSON 结构化输出"""
+        """调用 MiniMax API 并强制 JSON 结构化输出（带重试）"""
         json_system_prompt = system_prompt or ""
         json_system_prompt += "\nStrictly output JSON. No markdown prefix/suffix."
 
-        raw_output = await self.generate(
-            prompt=prompt,
-            system_prompt=json_system_prompt,
-            temperature=temperature,
-        )
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                raw_output = await self.generate(
+                    prompt=prompt,
+                    system_prompt=json_system_prompt,
+                    temperature=temperature + (attempt * 0.1),  # 每次重试微调温度
+                )
+                return extract_json_with_stack(raw_output)
+            except (ValueError, JSONParseError) as e:
+                last_error = e
+                logger.warning(
+                    f"generate_json JSON解析失败 (尝试 {attempt + 1}/{max_retries}): {str(e)[:100]}"
+                )
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                continue
 
-        try:
-            return extract_json_with_stack(raw_output)
-        except ValueError as e:
-            raise JSONParseError(
-                message=f"Failed to parse JSON: {str(e)}",
-                raw_response=raw_output[:1000],
-            )
+        raise JSONParseError(
+            message=f"Failed to parse JSON after {max_retries} attempts: {str(last_error)}",
+            raw_response="",
+        )
 
     # ── 域特定方法（保留原有功能） ──
 

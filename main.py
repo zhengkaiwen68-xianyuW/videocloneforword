@@ -60,6 +60,17 @@ def get_app():
             await database.create_tables()
             logger.info("Database tables initialized")
 
+            # 自动加载 seed 目录中的默认人格（如聪圣）
+            try:
+                from seed.load_personas import load_default_personas
+                seed_count = await load_default_personas(repo)
+                if seed_count > 0:
+                    logger.info(f"Loaded {seed_count} default persona(s) from seed/")
+            except ImportError:
+                pass  # seed/ 目录不存在或没有 load_personas 模块
+            except Exception as e:
+                logger.warning(f"Failed to load seed personas: {e}")
+
             # 清理卡死的任务（服务器异常关闭遗留）
             from persona_engine.storage.persona_repo import PersonaRepository
             from datetime import timedelta
